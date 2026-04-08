@@ -183,7 +183,6 @@ def get_hfi_launch_commands(repo_dir: str, is_continue: bool = False) -> list[st
     """Generate the commands the user needs to run to launch/continue HFI."""
     cmds = []
     if not is_continue:
-        cmds.append("tmux new-session -s hfi")
         cmds.append(f"cd {repo_dir}")
         cmds.append("./claude-hfi --tmux")
     else:

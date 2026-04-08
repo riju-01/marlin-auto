@@ -240,7 +240,7 @@ def display_setup_progress():
     )
 
 
-def display_hfi_commands(commands: list[str], prompt_text: str = ""):
+def display_hfi_commands(commands: list[str]):
     """Show the user what commands to run for HFI."""
     cmd_text = "\n".join(f"  {c}" for c in commands)
     console.print(Panel(
@@ -253,37 +253,34 @@ def display_hfi_commands(commands: list[str], prompt_text: str = ""):
 
     display_hfi_navigation()
 
-    if prompt_text:
-        console.print()
-        console.print(Panel(
-            prompt_text,
-            title="[bold]Paste this prompt into HFI[/bold]",
-            subtitle="[dim]Copy the text above[/dim]",
-            box=box.ROUNDED,
-            padding=(1, 2),
-        ))
-
 
 def display_hfi_navigation():
     """Show tmux window map so the user knows where everything is."""
     console.print()
     console.print(Panel(
-        "[bold]HFI runs inside tmux with 3 windows:[/bold]\n\n"
-        "  [cyan]Window 0[/cyan]  [bold]Feedback Form[/bold]        ← fill your answers here\n"
+        "[bold]When you run [cyan]./claude-hfi --tmux[/cyan] it creates a tmux session "
+        "with 3 windows:[/bold]\n\n"
+        "  [cyan]Window 0[/cyan]  [bold]Control / Feedback[/bold]   ← paste prompt here, fill feedback later\n"
         "  [cyan]Window 1[/cyan]  [bold]Model A trajectory[/bold]   ← watch model A work\n"
         "  [cyan]Window 2[/cyan]  [bold]Model B trajectory[/bold]   ← watch model B work\n\n"
-        "[bold]How to navigate:[/bold]\n\n"
-        "  [yellow]Ctrl+B then 0[/yellow]   → Go to feedback form\n"
-        "  [yellow]Ctrl+B then 1[/yellow]   → Watch Model A coding\n"
-        "  [yellow]Ctrl+B then 2[/yellow]   → Watch Model B coding\n"
-        "  [yellow]Ctrl+B then n[/yellow]   → Next window\n"
-        "  [yellow]Ctrl+B then p[/yellow]   → Previous window\n\n"
+        "[bold]How to switch windows (you must be INSIDE the tmux session):[/bold]\n\n"
+        "  [yellow]Ctrl+B[/yellow]  then  [yellow]0[/yellow]   → Go to control/feedback window\n"
+        "  [yellow]Ctrl+B[/yellow]  then  [yellow]1[/yellow]   → Watch Model A coding\n"
+        "  [yellow]Ctrl+B[/yellow]  then  [yellow]2[/yellow]   → Watch Model B coding\n"
+        "  [yellow]Ctrl+B[/yellow]  then  [yellow]n[/yellow]   → Next window\n"
+        "  [yellow]Ctrl+B[/yellow]  then  [yellow]p[/yellow]   → Previous window\n\n"
+        "  [dim]Press Ctrl+B first, RELEASE it, THEN press the number/letter.[/dim]\n"
+        "  [dim]If Ctrl+B doesnt work, you might not be inside tmux.[/dim]\n\n"
+        "[bold]If you closed the terminal and need to get back in:[/bold]\n\n"
+        "  [cyan]tmux attach -t hfi[/cyan]     (or just [cyan]tmux a[/cyan] if only one session)\n\n"
         "[bold]Workflow:[/bold]\n"
-        "  1. Paste prompt in Window 0 → both models start\n"
-        "  2. Monitor progress in Window 1 (A) and Window 2 (B)\n"
-        "  3. When both finish, go to [bold]Window 0[/bold] ([yellow]Ctrl+B then 0[/yellow])\n"
-        "  4. Fill the feedback form with generated answers\n"
-        "  5. Press Enter on each question → paste → Enter to submit",
+        "  1. Run [cyan]./claude-hfi --tmux[/cyan] → it prints a session ID\n"
+        "  2. Run [cyan]tmux attach -t <session-id>[/cyan] to enter the session\n"
+        "     (HFI prints the exact command for you, just copy-paste it)\n"
+        "  3. You land in Window 0 → paste the prompt\n"
+        "  4. Both models start in Windows 1 and 2 → switch to watch\n"
+        "  5. When both finish, [yellow]Ctrl+B then 0[/yellow] → fill feedback form\n"
+        "  6. Tab/Arrows to select question → Enter to open → paste → Enter",
         title="[bold]HFI tmux Navigation Guide[/bold]",
         box=box.HEAVY,
         padding=(1, 2),

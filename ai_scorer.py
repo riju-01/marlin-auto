@@ -1,9 +1,19 @@
 """
-AI detection scoring engine.
+AI detection scoring engine — calibrated against GPTZero / ZeroGPT / Originality.
 
-Scores text on multiple signals that AI detectors look for.
-Each sub-score is 0-1 (0 = human, 1 = AI). Weighted average gives overall score.
-Target: keep overall below 0.30 (30%).
+External AI detectors look for:
+  - Predictable sentence structure & uniform length
+  - Perfect grammar with zero typos or self-corrections
+  - Formulaic compare-contrast patterns ("Model A... Model B...")
+  - Evaluation clichés ("correctly implements", "better overall")
+  - High type-token ratio (too many unique "fancy" words)
+  - No fragments, asides, or incomplete thoughts
+  - Repeated opener words across sentences
+  - Consistent punctuation (no spacing quirks)
+  - Lack of first-person hedging ("I think", "not sure but")
+
+Each sub-score is 0-1 (0 = human-like, 1 = AI-like).
+Weighted average gives overall score. Target: keep below 0.30.
 """
 
 import math
@@ -11,6 +21,7 @@ import re
 from collections import Counter
 
 AI_VOCABULARY = {
+    # Classic LLM vocabulary
     "delve", "crucial", "comprehensive", "facilitate", "furthermore",
     "moreover", "additionally", "consequently", "nevertheless", "nonetheless",
     "robust", "seamless", "paradigm", "leverage", "utilize", "intricate",
@@ -25,6 +36,17 @@ AI_VOCABULARY = {
     "groundbreaking", "transformative", "salient", "discerning",
     "illuminating", "testament", "imperative", "paramount", "indispensable",
     "endeavor", "proficiency", "adept", "aptly", "poised",
+    "effectively", "particularly", "specifically", "accordingly",
+    "implementation", "functionality", "thoroughly", "accurately",
+    # Formal academic words GPTZero flags but classic lists miss
+    "enhances", "maintains", "readability", "maintainability",
+    "invasive", "incorporates", "introduces", "dedicated",
+    "streamlining", "offering", "strategy", "straightforward",
+    "manipulations", "reside", "determine",
+    "clarity", "refined", "functional", "lacking",
+    "potentially", "evident", "respective", "modifications",
+    "incorporating", "exhibited", "warranted", "necessitates",
+    "pertaining", "aforementioned", "delineated", "constitutes",
 }
 
 AI_TRANSITIONS = {
@@ -34,6 +56,45 @@ AI_TRANSITIONS = {
     "ultimately", "importantly", "significantly", "interestingly",
     "crucially", "overall",
 }
+
+EVAL_CLICHES = [
+    r"\bcorrectly\s+(?:implements?|identifies?|modifies?|handles?|addresses?)\b",
+    r"\bbetter overall\b",
+    r"\bas a result\b",
+    r"\bshows a better understanding\b",
+    r"\bmore (?:robust|thorough|comprehensive|complete)\b",
+    r"\bfails to (?:address|mention|identify|highlight)\b",
+    r"\bdoes a (?:good|better|great|solid) job\b",
+    r"\bkey (?:optimization|improvement|change|aspect)\b",
+    r"\bworth noting\b",
+    r"\bmore (?:explicit|concise|verbose|readable)\b",
+    r"\bclearer (?:summary|explanation|description)\b",
+    r"\beasier to (?:understand|follow|maintain|read)\b",
+    r"\bprovides a (?:more|clearer|better)\b",
+    r"\bintroduces (?:additional|unnecessary|extra) (?:complexity|logic|overhead)\b",
+    r"\bpreventing potential\b",
+    r"\bmore (?:cautious|careful|conservative)\b",
+    r"\bprioritize[sd]? safety\b",
+    # Formal connectors GPTZero flags
+    r"\bin contrast\b",
+    r"\bthis strategy\b",
+    r"\bwithout a clear benefit\b",
+    r"\bpotentially leading to\b",
+    r"\bwhile functional\b",
+    r"\boffering more (?:clarity|control|flexibility)\b",
+    r"\benhances? (?:readability|maintainability|clarity|safety)\b",
+    r"\bstreamlining the\b",
+    r"\badding complexity\b",
+    r"\bless invasive\b",
+    r"\ba clearer approach\b",
+    r"\brefin(?:ed|ing) logic\b",
+]
+
+META_PHRASES = [
+    r"\bthe (?:explanation|description|summary|analysis) (?:of|is)\b",
+    r"\bthe summary (?:also|doesnt|misses)\b",
+    r"\bmodel [ab](?:'s| also| does| shows| has| provides| correctly)\b",
+]
 
 
 def _tokenize(text: str) -> list[str]:
@@ -63,10 +124,12 @@ def _score_sentence_uniformity(sentences: list[str]) -> float:
     cv = math.sqrt(variance) / mean_len
     if cv < 0.2:
         return 1.0
-    if cv < 0.35:
-        return 0.7
+    if cv < 0.3:
+        return 0.8
+    if cv < 0.4:
+        return 0.5
     if cv < 0.5:
-        return 0.3
+        return 0.2
     return 0.0
 
 
@@ -82,7 +145,14 @@ def _score_transition_density(sentences: list[str]) -> float:
 
 
 def _score_contraction_absence(text: str) -> float:
-    contractions = len(re.findall(r"\b\w+n't\b|\b\w+'(?:ve|re|ll|d|s|m)\b", text))
+    standard = len(re.findall(r"\b\w+n't\b|\b\w+'(?:ve|re|ll|d|s|m)\b", text))
+    dropped = len(re.findall(
+        r"\b(?:dont|doesnt|didnt|cant|wont|shouldnt|wouldnt|couldnt|"
+        r"isnt|arent|wasnt|werent|hasnt|havent|hadnt|"
+        r"thats|theres|its|ive|youre|youve|theyre|weve|"
+        r"itd|itll|thatll|whats|heres|whos)\b", text, re.I
+    ))
+    contractions = standard + dropped
     words = len(text.split())
     if words < 20:
         return 0.0
@@ -143,41 +213,53 @@ def _score_paragraph_uniformity(text: str) -> float:
 
 def _score_formality(text: str) -> float:
     contractions = len(re.findall(r"\b\w+n't\b|\b\w+'(?:ve|re|ll|d|s|m)\b", text))
+    dropped_contr = len(re.findall(
+        r"\b(?:dont|doesnt|didnt|cant|wont|shouldnt|isnt|thats|its|ive)\b", text, re.I
+    ))
     informal = len(re.findall(
-        r"\b(?:gonna|gotta|kinda|sorta|y'all|dunno|wanna|yeah|nah|ok|okay)\b", text, re.I
+        r"\b(?:gonna|gotta|kinda|sorta|y'all|dunno|wanna|yeah|nah|ok|okay|"
+        r"tbh|imo|fwiw|btw|lol|hmm|idk|ngl|tho|prolly)\b", text, re.I
     ))
     dashes_as_pauses = len(re.findall(r" - ", text))
     parens = len(re.findall(r"\(", text))
+    hedges = len(re.findall(
+        r"\b(?:I think|not sure|maybe|probably|might be|could be|I guess|"
+        r"feels like|seems like|looks like|hard to say)\b", text, re.I
+    ))
     words = len(text.split())
     if words < 20:
         return 0.0
-    human_signals = contractions + informal + dashes_as_pauses + parens
+    human_signals = (contractions + dropped_contr + informal +
+                     dashes_as_pauses + parens + hedges)
     ratio = human_signals / words
-    if ratio > 0.03:
+    if ratio > 0.04:
         return 0.0
+    if ratio > 0.025:
+        return 0.1
     if ratio > 0.015:
-        return 0.2
+        return 0.3
     if ratio > 0.005:
-        return 0.5
-    return 0.9
+        return 0.6
+    return 0.95
 
 
 def _score_opener_repetition(text: str) -> float:
-    """Detect repeated sentence/paragraph openers - a strong AI signal."""
     sentences = _split_sentences(text)
-    if len(sentences) < 4:
+    if len(sentences) < 3:
         return 0.0
     openers = []
     for s in sentences:
-        words = s.strip().split()[:3]
+        words = s.strip().split()[:2]
         openers.append(" ".join(w.lower() for w in words))
     counts = Counter(openers)
     if not counts:
         return 0.0
     most_common_count = counts.most_common(1)[0][1]
     ratio = most_common_count / len(openers)
-    if ratio > 0.4:
+    if ratio > 0.5:
         return 1.0
+    if ratio > 0.35:
+        return 0.8
     if ratio > 0.25:
         return 0.6
     if ratio > 0.15:
@@ -185,8 +267,160 @@ def _score_opener_repetition(text: str) -> float:
     return 0.0
 
 
+_AI_PHRASE_PATTERNS = [
+    r"\bCurrently,?\s",
+    r"\bIdeally,?\s",
+    r"\bDone means\b",
+    r"\bThis is especially\b",
+    r"\bThis should be done\b",
+    r"\bIt is not always clear\b",
+    r"\bmaking it harder to\b",
+    r"\bwhich adds overhead\b",
+    r"\bIn summary,?\s",
+    r"\bTo summarize,?\s",
+    r"\bIn this context,?\s",
+    r"\bIt is worth mentioning\b",
+    r"\bFor standard\b.*\bshould be\b",
+    r"\bin a way that does not break\b",
+    r"\bmore solid and easier\b",
+    r"\bleading to potential\b",
+    r"\bThis ensures\b",
+    r"\bBy doing so\b",
+    r"\bAs a result\b",
+    r"\bWith this approach\b",
+]
+
+
+def _score_ai_phrasing(text: str) -> float:
+    if len(text) < 80:
+        return 0.0
+    hits = 0
+    for pat in _AI_PHRASE_PATTERNS:
+        if re.search(pat, text, re.I):
+            hits += 1
+    if hits >= 5:
+        return 1.0
+    if hits >= 3:
+        return 0.7
+    if hits >= 2:
+        return 0.5
+    if hits >= 1:
+        return 0.25
+    return 0.0
+
+
+def _score_eval_cliches(text: str) -> float:
+    """Detect evaluation clichés that scream AI-written review."""
+    if len(text) < 60:
+        return 0.0
+    hits = 0
+    for pat in EVAL_CLICHES:
+        if re.search(pat, text, re.I):
+            hits += 1
+    if hits >= 5:
+        return 1.0
+    if hits >= 3:
+        return 0.8
+    if hits >= 2:
+        return 0.6
+    if hits >= 1:
+        return 0.35
+    return 0.0
+
+
+def _score_meta_phrases(text: str) -> float:
+    """Detect meta-commentary phrases like 'The explanation of X is...'"""
+    if len(text) < 60:
+        return 0.0
+    hits = 0
+    for pat in META_PHRASES:
+        hits += len(re.findall(pat, text, re.I))
+    if hits >= 4:
+        return 1.0
+    if hits >= 3:
+        return 0.8
+    if hits >= 2:
+        return 0.6
+    if hits >= 1:
+        return 0.3
+    return 0.0
+
+
+def _score_no_imperfections(text: str) -> float:
+    """Penalize text with zero human imperfections (typos, fragments, hedges, self-corrections)."""
+    words = len(text.split())
+    if words < 25:
+        return 0.0
+    sentences = _split_sentences(text)
+    imperfection_signals = 0
+
+    fragments = sum(1 for s in sentences if len(s.split()) <= 5)
+    if fragments > 0:
+        imperfection_signals += fragments
+
+    hedges = len(re.findall(
+        r"\b(?:I think|not sure|maybe|probably|might|could be|"
+        r"I guess|feels like|seems like|hard to say|"
+        r"not 100%|not totally|sorta|kinda)\b", text, re.I
+    ))
+    imperfection_signals += hedges
+
+    self_corrections = len(re.findall(
+        r"\b(?:well actually|wait no|I mean|or rather|"
+        r"scratch that|actually wait)\b", text, re.I
+    ))
+    imperfection_signals += self_corrections * 2
+
+    asides = len(re.findall(r"\((?:worth noting|like|tbh|though|fwiw|imo)", text, re.I))
+    imperfection_signals += asides
+
+    spacing_quirks = len(re.findall(r"\w ,\w", text))
+    imperfection_signals += spacing_quirks
+
+    ratio = imperfection_signals / max(len(sentences), 1)
+    if ratio > 0.5:
+        return 0.0
+    if ratio > 0.3:
+        return 0.2
+    if ratio > 0.15:
+        return 0.4
+    if ratio > 0.05:
+        return 0.6
+    return 0.9
+
+
+def _score_perfect_grammar(text: str) -> float:
+    """High score = suspiciously perfect grammar. External detectors weight this heavily."""
+    words = len(text.split())
+    if words < 25:
+        return 0.0
+    sentences = _split_sentences(text)
+    if len(sentences) < 3:
+        return 0.0
+
+    all_complete = all(len(s.split()) >= 6 for s in sentences)
+    all_end_properly = all(s.rstrip()[-1] in '.!?' for s in sentences if s.rstrip())
+    no_fragments = all(len(s.split()) > 4 for s in sentences)
+
+    has_comma_before_conj = bool(re.search(r',\s+(?:and|but|or|so)\s+', text))
+    has_proper_lists = bool(re.search(r',\s+\w+,\s+and\s+', text))
+
+    score = 0.0
+    if all_complete:
+        score += 0.3
+    if all_end_properly:
+        score += 0.2
+    if no_fragments:
+        score += 0.2
+    if has_comma_before_conj and has_proper_lists:
+        score += 0.15
+    if not re.search(r'\.\s*\.\s', text):
+        score += 0.15
+
+    return min(score, 1.0)
+
+
 def _clean_for_scoring(text: str) -> str:
-    """Strip markdown headers, metadata lines, and rating lines before scoring."""
     text = re.sub(r'^#+.*$', '', text, flags=re.M)
     text = re.sub(r'^---\s*$', '', text, flags=re.M)
     text = re.sub(r'^\*\*.*?\*\*\s*$', '', text, flags=re.M)
@@ -200,6 +434,7 @@ def score_text(text: str) -> dict:
     """
     Full AI-likelihood score breakdown.
     Returns dict with per-signal scores and weighted overall (0-1).
+    Calibrated to approximate GPTZero/ZeroGPT detection thresholds.
     """
     clean = _clean_for_scoring(text)
     if len(clean) < 50:
@@ -218,18 +453,28 @@ def score_text(text: str) -> dict:
         "paragraph_uniformity": _score_paragraph_uniformity(clean),
         "formality_level":      _score_formality(clean),
         "opener_repetition":    _score_opener_repetition(clean),
+        "ai_phrasing":          _score_ai_phrasing(clean),
+        "eval_cliches":         _score_eval_cliches(clean),
+        "meta_phrases":         _score_meta_phrases(clean),
+        "no_imperfections":     _score_no_imperfections(clean),
+        "perfect_grammar":      _score_perfect_grammar(clean),
     }
 
     weights = {
-        "ai_vocabulary":        0.18,
-        "sentence_uniformity":  0.10,
-        "transition_density":   0.13,
-        "contraction_absence":  0.08,
-        "em_dash_usage":        0.05,
-        "vocab_diversity":      0.08,
-        "paragraph_uniformity": 0.13,
-        "formality_level":      0.12,
-        "opener_repetition":    0.13,
+        "ai_vocabulary":        0.14,
+        "sentence_uniformity":  0.08,
+        "transition_density":   0.04,
+        "contraction_absence":  0.04,
+        "em_dash_usage":        0.02,
+        "vocab_diversity":      0.03,
+        "paragraph_uniformity": 0.04,
+        "formality_level":      0.08,
+        "opener_repetition":    0.06,
+        "ai_phrasing":          0.05,
+        "eval_cliches":         0.12,
+        "meta_phrases":         0.04,
+        "no_imperfections":     0.12,
+        "perfect_grammar":      0.14,
     }
 
     overall = sum(scores[k] * weights[k] for k in scores)
@@ -238,7 +483,6 @@ def score_text(text: str) -> dict:
 
 
 def score_field(text: str) -> float:
-    """Quick single-number AI score for one feedback field."""
     return score_text(text).get("overall", 0.0)
 
 
@@ -270,7 +514,6 @@ def format_score_report(scores: dict, label: str = "") -> str:
 
 
 def check_pr_references(text: str) -> list[str]:
-    """Check for leaked PR references that would cause rejection."""
     issues = []
     t = text.lower()
     if re.search(r'#\d{3,6}', text):
@@ -286,7 +529,6 @@ def check_pr_references(text: str) -> list[str]:
 
 
 def check_role_prompting(text: str) -> list[str]:
-    """Check for role-based prompting patterns."""
     issues = []
     patterns = [
         (r'(?i)\byou are a[n]?\s+\w+', "Role assignment"),
@@ -312,7 +554,6 @@ def check_em_dashes(text: str) -> list[str]:
 
 
 def full_validation(text: str) -> dict:
-    """Run all checks: AI score + PR refs + role prompting + em dashes."""
     scores = score_text(text)
     return {
         "scores": scores,

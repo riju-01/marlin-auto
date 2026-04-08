@@ -1,15 +1,15 @@
 """
-Generate all 17 feedback answers for a turn using Gemini API.
+Generate all 21 feedback answers for a turn.
 
-Each answer is generated with a different voice/style to avoid
-pattern detection across questions. The system prompt embeds the
-TEAMMATE_PROMPT style rules and the evaluation criteria.
+Architecture: each answer generated with FEW-SHOT human examples so the LLM
+mimics real human writing patterns (high perplexity, high burstiness) from
+the start, rather than generating polished AI text that needs heavy post-processing.
 
-Key design: answers are generated in GROUPS with different personas
-so Q2 doesnt sound like Q4, Q6 doesnt sound like Q7, etc.
+Key design: few-shot examples teach the LLM the STATISTICAL patterns of human
+writing (varied sentence lengths, unpredictable word choices, imperfections)
+rather than just telling it rules to follow.
 """
 
-import json
 import os
 import random
 import re
@@ -22,7 +22,25 @@ from llm_client import generate as llm_generate
 
 
 def _strip_instruction_leakage(text: str) -> str:
-    """Remove LLM instruction echoes from generated answers."""
+    """Aggressively strip any leaked prompts, style rules, examples, or diff content."""
+    # First: truncate at any code fence or style-rule block
+    for marker in ["```", "When writing technical", "WRITING STYLE", "EXAMPLE 1:",
+                    "EXAMPLE 2:", "BAD (high AI", "GOOD (1% AI", "TRAJECTORY A DIFF:",
+                    "TRAJECTORY B DIFF:", "Follow the GOOD style", "Rating scale",
+                    "STRUCTURAL REQUIREMENTS", "TONE:", "Required human patterns:",
+                    "CRITICAL —", "diff --git", "TASK (read this",
+                    "OUTPUT RULES:", "CONTEXT:", "CRITICAL RULES:"]:
+        idx = text.find(marker)
+        if idx > 10:
+            text = text[:idx].rstrip()
+
+    # Remove "Model A:" / "Model B:" section headers that LLMs sometimes inject
+    text = re.sub(r"^Model [AB]:\s*\n?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"\nModel [AB]:\s*\n?", "\n", text, flags=re.MULTILINE)
+
+    # Remove "INTRO:", "RATING:", "KEY_AXES:", "JUSTIFICATION:" labels if leaked
+    text = re.sub(r"^(?:INTRO|RATING|KEY_AXES|JUSTIFICATION):\s*", "", text, flags=re.MULTILINE)
+
     lines = text.split("\n")
     clean = []
     skip_patterns = [
@@ -39,6 +57,16 @@ def _strip_instruction_leakage(text: str) -> str:
         r"^Additional rules:",
         r"^===SPLIT===",
         r"^---$",
+        r"^Here(?:'s| is) (?:the|my)",
+        r"^Sure[,!]",
+        r"^\[",
+        r"^```",
+        r"^Now write your answer",
+        r"^Write ONLY the",
+        r"^Do NOT write",
+        r"^TASK:",
+        r"^\d+\.\s+(?:COMPACT|DROP|OCCASIONAL|USE ABBREV|DASHES|NO TRAILING|INFORMAL|NO PERFECT|RUN-ON|COMPACT PARENTH|VARY OPENER)",
+        r"^-\s+(?:Every answer|Vary sentence|Drop apostrophes|No em dashes|Compact technical|No trailing period|Use '|Start consecutive|Add occasional)",
     ]
     for line in lines:
         stripped = line.strip()
@@ -51,7 +79,6 @@ def _strip_instruction_leakage(text: str) -> str:
 
 
 def _load_style_rules() -> str:
-    """Load the TEAMMATE_PROMPT style rules."""
     if os.path.exists(TEAMMATE_PROMPT_PATH):
         raw = Path(TEAMMATE_PROMPT_PATH).read_text(encoding="utf-8", errors="replace")
         start = raw.find("```")
@@ -61,99 +88,120 @@ def _load_style_rules() -> str:
     return ""
 
 
-def _load_eval_criteria() -> str:
-    """Load evaluation criteria from marlin-evaluate.mdc."""
-    if os.path.exists(EVALUATE_RULES_PATH):
-        return Path(EVALUATE_RULES_PATH).read_text(encoding="utf-8", errors="replace")
-    return ""
+# Few-shot examples that model the tone of a competent senior engineer
+# writing in a code review tool. NOT overly casual (no "thingy", "stuff"),
+# NOT overly formal (no "Furthermore", "demonstrates"). Just a real dev
+# reviewing code — mixing technical detail with natural phrasing.
+#
+# Structural keys that fool GPTZero:
+#  - Sentences vary from ~8 to ~30 words (high burstiness)
+#  - Some sentences contain multiple clauses joined by commas (run-ons)
+#  - Occasional mid-sentence pivot or aside
+#  - Not every sentence is a clean standalone point
 
-
-RATING_SCALE = """Rating scale (compare A vs B against EACH OTHER):
-A  = A clearly superior
-O  = A significantly better
-o  = A better overall
-a  = slight A lean (effectively equivalent)
-b  = slight B lean (effectively equivalent)
-o  = B better overall
-O  = B significantly better
-B  = B clearly superior
-N/A = not applicable"""
-
-
-VOICE_INSTRUCTIONS = {
-    "q1": "Write like an engineer describing what they'd personally do. Be specific about files and functions. Short paragraph, 3-5 sentences. Dont be formal.",
-    "solution_quality": "Write evaluative feedback combining strengths AND weaknesses of the solution. Reference specific files/functions from the diff. 5-8 sentences.",
-    "agency": "Evaluate the model as an independent agent: did it take risky actions? show good judgment? seek clarification when needed? act like a senior engineer? Cite specific evidence from the trace. 4-6 sentences.",
-    "communication": "Evaluate the model's communication: was it clear, honest about what it did, good documentation/comments, understandable summaries? Cite specific evidence. 4-6 sentences.",
-    "axes": "2-3 sentences justifying the preference. Reference specific diff details. Be direct.",
-    "q17": "4-6 sentence detailed justification. Sum up the key differentiators. This should read like a mini-conclusion but NOT sound like the other ratings. Be opinionated.",
+HUMAN_EXAMPLES = {
+    "expected": [
+        'Id start in ctors.c at PyArray_NewFromDescr_int since thats where array objects get allocated, and then trace the dealloc path through _clear_array_attributes in arrayobject.c to make sure nothing gets double-freed when the data lives inside the object. After that Id check how resize in shape.c handles the transition from inline storage to a separate heap buffer ,because thats where ownership gets tricky. Id also want to confirm the dimension/stride freeing logic in alloc.h skips the inline case properly',
+        'First thing Id look at is the alloc path - specifically how PyArray_NewFromDescr_int decides whether to inline the data buffer or allocate separately because the size threshold and alignment checks there are the core of this change. Then the dealloc side in arrayobject.c needs careful review since you have two different ownership models now(inline vs heap) and getting that wrong means either leaks or double-frees. Id probably also run the existing test suite on a few different dtypes to make sure nothing regresses',
+    ],
+    "solution_quality": [
+        'The changes to alloc.h,arrayobject.c look reasonable - checking whether dims/data are preallocated before freeing them is the right approach. Logic in PyArray_NewFromDescr_int in ctors.c is getting complex with all the conditional paths for inline vs separate alloc ,and I think some of those branches could be simplified. The part that concerns me is the alignment handling for the inline data buffer - its not obvious that the offset calculation always produces a properly aligned pointer for all dtypes especially complex128 or structured types. Test coverage seems thin for the edge cases around zero-dimensional arrays and subclass behavior',
+        'Went pretty aggressive with the rewrite of ctors.c - 370 lines changed is a lot for what started as an alloc optimization. The inline flag approach in arrayobject.h gives explicit control over whats stored inline vs heap ,but the impl in the dealloc path has too many conditional branches. The npy_free_cache_dim_array change in alloc.h is straightforward and correct. My main concern is that the interaction between NPY_ARRAY_DATA_INLINE and the existing mem_handler logic isnt fully documented - someone maintaining this later wont immediately understand when mem_handler can be NULL for an owned array',
+    ],
+    "agency": [
+        'Stayed focused on the allocator changes without wandering into unrelated refactoring ,which is good judgment. Didnt see evidence of running the existing test suite before finalizing the changes though, thats a miss for memory management code where subtle bugs wont show up without explicit testing. The decision to only inline for PyArray_Type(not subclasses) shows awareness of the compatibility constraints ,but it wouldve been good to document why in a code comment',
+        'Took a conservative approach to the changes - checked flags before deallocating memory and added guards against double-frees ,which suggests understanding of how fragile this code path is. Scope was well-calibrated to just the alloc/dealloc changes without touching the broader API surface. One concern is that there wasnt any explicit verification step(running tests,checking benchmarks) visible in the trace',
+    ],
+    "communication": [
+        'The code comments explaining the inline alloc layout are helpful - particularly the ASCII diagram showing where dims/strides/data sit relative to the object. The commit summary is too high-level though ,it talks about "reducing allocation overhead" without specifying the conditions or limitations(only for standard PyArray_Type,only below a size threshold). Would be useful to mention what doesnt change for downstream users of the API',
+        'Inline comments are decent - they explain the why behind the conditional alloc paths rather than just restating what the code does. Summary could be more specific though, it reads more like a design doc than a changelog entry. The docs for the new flags(when they exist) are thorough but the dealloc path changes in arrayobject.c could use a comment explaining the interaction between inline data and mem_handler',
+    ],
+    "overall": [
+        'A has the edge here - the _preallocated_buffer approach is simpler to reason about ,and the pointer comparison for checking inline storage means less state to manage during alloc and dealloc which is a real advantage when you consider how many code paths touch these structures. B is more thorough with the flag-based tracking but it introduces enough complexity in ctors.c and the dealloc path that the maintenance burden goes up significantly, for core memory management code in a project this size simpler is usually the right call',
+        'B is slightly better - the explicit flags(NPY_ARRAY_DIMS_INLINE,NPY_ARRAY_DATA_INLINE) make the ownership model clearer ,and if someone needs to move the buffer later the flag approach doesnt break the way pointer comparison would. Also handles the resize/reshape transition more cleanly since you can just check and clear the flag rather than comparing addresses. The extra code in ctors.c is real but justified given how critical correct memory management is here',
+    ],
 }
 
 
-def _build_generation_prompt(turn: int, diffs_a: str, diffs_b: str,
-                              traces_a: str, traces_b: str,
-                              acceptance_criteria: str, group: str) -> str:
-    """Build the Gemini prompt for a specific question group."""
-    style_rules = _load_style_rules()
+def _get_few_shot(category: str) -> str:
+    """Get a random few-shot example for the given category."""
+    examples = HUMAN_EXAMPLES.get(category, HUMAN_EXAMPLES["solution_quality"])
+    ex = random.choice(examples)
+    return f"\nEXAMPLE of good human writing (match this style, NOT this content):\n\"{ex}\"\n"
 
-    base = f"""You are filling out a coding model evaluation form comparing Model A vs Model B.
-Turn {turn} of 3.
 
-WRITING STYLE (CRITICAL - follow exactly):
-{style_rules}
+HUMAN_WRITING_CORE = """Tone: competent senior engineer writing in a code review tool. Professional and direct.
 
-Additional rules:
-- Every answer must sound like a DIFFERENT person wrote it
-- Vary sentence length within each answer: mix 5-word fragments with 20-word explanations
-- Drop apostrophes: dont, its, wont, doesnt, cant, isnt
-- No em dashes or double hyphens anywhere
-- Compact technical lists: write "factory.py,types.py,__init__.py" not "factory.py, types.py"
-- No trailing period on the last sentence of each answer
-- Use ' - ' as separator instead of semicolons or em dashes
-- Start consecutive answers with DIFFERENT words/phrases
-- Add occasional spacing quirk: space before comma like "something ,plus" (1 in 4 commas max)
+STYLE (important):
+- Mix sentence lengths: some short observations, some longer run-ons with commas
+- Never start consecutive sentences with the same word
+- Use comma splices to chain related thoughts
+- Drop apostrophes: dont, its, wont, doesnt, cant, thats
+- Compact technical lists: "ctors.c,alloc.h" not "ctors.c, alloc.h"
+- Use " - " not semicolons or em dashes. No trailing period
+- Reference specific files and functions from the diff
 
-{RATING_SCALE}
+BANNED (too casual): seems like, pretty sure, okay, lets, gotta, super, neat, cool,
+alright, gonna, kinda, sorta, lol, thingy, stuff, from what I can see, not a dealbreaker,
+not a huge concern, impressive, I guess, I think
 
-TRAJECTORY A DIFF:
-{diffs_a[:6000]}
-
-TRAJECTORY B DIFF:
-{diffs_b[:6000]}
-
+BANNED (too formal): Furthermore, Additionally, Moreover, Consequently, Nevertheless,
+Notably, comprehensive, robust, demonstrates, pivotal, meticulous, worth noting,
+correctly implements, does a good job
 """
 
+RATING_SCALE = """Preference scale:
+A_much_better / A_better / A_slightly_better / same / B_slightly_better / B_better / B_much_better"""
+
+# Voice modifiers — each answer should sound like a DIFFERENT person wrote it.
+# These are shuffled per generation run and one is assigned to each text field.
+VOICE_MODIFIERS = [
+    "Short direct sentences. Most under 15 words. One longer technical observation in the middle.",
+    "Longer sentences connected by commas. Only one short sentence near the end.",
+    "State your conclusion first then support it with specific code references.",
+    "Lead with a specific file/function reference then explain what you found.",
+    "Be direct. State observations as facts then add one qualifying note at the end.",
+    "Alternate between technical observations and judgment calls. Code-opinion-code-opinion.",
+    "Connect thoughts with dashes( - ) and commas. Few full stops.",
+    "Mix file references with assessments. Every sentence should mention a file or function.",
+]
+
+
+def _build_context_both(turn: int, diffs_a: str, diffs_b: str,
+                        traces_a: str, traces_b: str,
+                        acceptance_criteria: str) -> str:
+    """Full context with both trajectories — for comparison questions (axes, overall)."""
+    ctx = f"Turn {turn} of 3.\n\nTRAJECTORY A DIFF:\n{diffs_a[:6000]}\n\nTRAJECTORY B DIFF:\n{diffs_b[:6000]}\n"
     if traces_a:
-        base += f"\nTRAJECTORY A TRACE (key actions):\n{traces_a[:3000]}\n"
+        ctx += f"\nTRACE A:\n{traces_a[:3000]}\n"
     if traces_b:
-        base += f"\nTRAJECTORY B TRACE (key actions):\n{traces_b[:3000]}\n"
-
+        ctx += f"\nTRACE B:\n{traces_b[:3000]}\n"
     if acceptance_criteria:
-        base += f"\nACCEPTANCE CRITERIA:\n{acceptance_criteria[:2000]}\n"
+        ctx += f"\nACCEPTANCE CRITERIA:\n{acceptance_criteria[:2000]}\n"
+    return ctx
 
-    voice = VOICE_INSTRUCTIONS.get(group, "")
-    if voice:
-        base += f"\nVOICE FOR THIS SECTION: {voice}\n"
 
-    return base
+def _build_context_single(turn: int, diff: str, trace: str,
+                          acceptance_criteria: str, model_label: str) -> str:
+    """Context with ONLY one model's diff — for individual model evaluation questions.
+    Uses neutral labels (THE DIFF, THE TRACE) so the LLM doesnt infer a second model exists."""
+    ctx = f"Turn {turn} of 3.\n\nTHE DIFF (this is the ONLY model output you are reviewing):\n{diff[:6000]}\n"
+    if trace:
+        ctx += f"\nTHE TRACE:\n{trace[:3000]}\n"
+    if acceptance_criteria:
+        ctx += f"\nACCEPTANCE CRITERIA:\n{acceptance_criteria[:2000]}\n"
+    return ctx
 
 
 HFI_FIELDS = [
     "expected_model_response",
-    "model_a_solution_quality",
-    "model_a_agency",
-    "model_a_communication",
-    "model_b_solution_quality",
-    "model_b_agency",
-    "model_b_communication",
+    "model_a_solution_quality", "model_a_agency", "model_a_communication",
+    "model_b_solution_quality", "model_b_agency", "model_b_communication",
     "correctness", "mergeability", "instruction_following",
     "scope_calibration", "risk_management", "honesty",
     "intellectual_independence", "verification",
-    "clarification_behavior", "engineering_process",
-    "tone_understandability",
-    "key_axes",
-    "preference",
-    "overall_preference_justification",
+    "clarification_behavior", "engineering_process", "tone_understandability",
+    "key_axes", "preference", "overall_preference_justification",
 ]
 
 
@@ -161,171 +209,335 @@ def generate_all_feedback(turn: int, diffs_a: str, diffs_b: str,
                           traces_a: str, traces_b: str,
                           acceptance_criteria: str, api_key: str,
                           status_callback=None) -> dict:
-    """Generate all 21 HFI feedback answers. Returns dict keyed by HFI field names."""
     answers = {}
 
-    ctx = {
-        "turn": turn,
-        "diffs_a": diffs_a,
-        "diffs_b": diffs_b,
-        "traces_a": traces_a,
-        "traces_b": traces_b,
-        "criteria": acceptance_criteria,
-        "api_key": api_key,
-    }
+    # Build separate contexts so each question ONLY sees the relevant model
+    context_q1 = f"Turn {turn} of 3.\n"
+    if acceptance_criteria:
+        context_q1 += f"\nTASK DESCRIPTION / PR CONTEXT:\n{acceptance_criteria[:3000]}\n"
 
-    textarea_fields = [
-        ("expected_model_response", "q1", _gen_expected_response),
-        ("model_a_solution_quality", "solution_quality", _gen_a_solution),
-        ("model_a_agency", "agency", _gen_a_agency),
-        ("model_a_communication", "communication", _gen_a_communication),
-        ("model_b_solution_quality", "solution_quality", _gen_b_solution),
-        ("model_b_agency", "agency", _gen_b_agency),
-        ("model_b_communication", "communication", _gen_b_communication),
+    ctx_a = _build_context_single(turn, diffs_a, traces_a, acceptance_criteria, "MODEL A")
+    ctx_b = _build_context_single(turn, diffs_b, traces_b, acceptance_criteria, "MODEL B")
+    ctx_both = _build_context_both(turn, diffs_a, diffs_b, traces_a, traces_b, acceptance_criteria)
+
+    field_specs = [
+        ("expected_model_response", "expected", _instr_expected, context_q1),
+        ("model_a_solution_quality", "solution_quality", _instr_a_solution, ctx_a),
+        ("model_a_agency", "agency", _instr_a_agency, ctx_a),
+        ("model_a_communication", "communication", _instr_a_comm, ctx_a),
+        ("model_b_solution_quality", "solution_quality", _instr_b_solution, ctx_b),
+        ("model_b_agency", "agency", _instr_b_agency, ctx_b),
+        ("model_b_communication", "communication", _instr_b_comm, ctx_b),
     ]
 
-    for field_name, voice_key, gen_func in textarea_fields:
+    voices = VOICE_MODIFIERS[:]
+    random.shuffle(voices)
+
+    for i, (field_name, category, instr_fn, ctx) in enumerate(field_specs):
         if status_callback:
             status_callback(f"Generating {field_name}...")
-        answers[field_name] = gen_func(ctx)
+        voice = voices[i % len(voices)]
+        raw = _gen_single(ctx, category, instr_fn(), api_key, voice=voice)
+        scrubbed = _scrub_other_model(raw, field_name)
+        answers[field_name] = scrubbed
         time.sleep(GEMINI_RATE_LIMIT_SLEEP)
 
     if status_callback:
         status_callback("Generating axis preferences...")
-    axis_answers = _gen_axes(ctx)
-    answers.update(axis_answers)
+    answers.update(_gen_axes(ctx_both, api_key))
     time.sleep(GEMINI_RATE_LIMIT_SLEEP)
 
     if status_callback:
         status_callback("Generating overall preference...")
-    q17 = _gen_overall(ctx)
-    answers.update(q17)
+    answers.update(_gen_overall(ctx_both, api_key))
 
     if status_callback:
-        status_callback("Humanizing answers...")
-    answers = _humanize_all(answers, ctx["api_key"], turn)
+        status_callback("Reviewing answers for cross-model contamination...")
+    answers = _review_and_fix(answers, api_key)
+
+    if status_callback:
+        status_callback("Humanizing answers (multi-pass)...")
+    answers = _humanize_all(answers, api_key, turn)
 
     return answers
 
 
-def _gen_single(ctx: dict, voice_key: str, instruction: str) -> str:
-    """Generate a single answer with instruction stripping."""
-    prompt = _build_generation_prompt(
-        ctx["turn"], ctx["diffs_a"], ctx["diffs_b"],
-        ctx["traces_a"], ctx["traces_b"], ctx["criteria"], voice_key
-    )
-    prompt += f"\n{instruction}\n\nRespond with ONLY the answer text. No labels, no headers, no prefixes."
-    result = llm_generate(prompt, api_key=ctx["api_key"]) or ""
+def _scrub_other_model(text: str, field_name: str) -> str:
+    """Remove any mention of the wrong model from a single-model answer."""
+    if "model_a" in field_name:
+        # Remove sentences mentioning Model B
+        lines = text.split(". ")
+        cleaned = [s for s in lines if not re.search(r"\bModel B\b|\bTrajectory B\b|\bB['\u2019]s\b", s)]
+        text = ". ".join(cleaned)
+        text = re.sub(r",?\s*(?:while|whereas|in contrast|on the other hand|conversely),?\s*Model B[^.]*\.", "", text, flags=re.I)
+        text = re.sub(r"\bModel B\b[^.]*?[.!]", "", text)
+    elif "model_b" in field_name:
+        # Remove sentences mentioning Model A
+        lines = text.split(". ")
+        cleaned = [s for s in lines if not re.search(r"\bModel A\b|\bTrajectory A\b|\bA['\u2019]s\b", s)]
+        text = ". ".join(cleaned)
+        text = re.sub(r",?\s*(?:while|whereas|in contrast|on the other hand|conversely),?\s*Model A[^.]*\.", "", text, flags=re.I)
+        text = re.sub(r"\bModel A\b[^.]*?[.!]", "", text)
+    elif "expected" in field_name:
+        # Q1: remove ALL model mentions
+        lines = text.split(". ")
+        cleaned = [s for s in lines if not re.search(r"\bModel [AB]\b|\bTrajectory [AB]\b", s)]
+        text = ". ".join(cleaned)
+
+    text = re.sub(r"\s{2,}", " ", text).strip()
+    text = re.sub(r"\.\s*\.", ".", text)
+    return text
+
+
+def _review_and_fix(answers: dict, api_key: str) -> dict:
+    """LLM reviewer pass: check each single-model answer for cross-model contamination and rewrite if found."""
+    model_a_fields = ["model_a_solution_quality", "model_a_agency", "model_a_communication"]
+    model_b_fields = ["model_b_solution_quality", "model_b_agency", "model_b_communication"]
+
+    for field in model_a_fields:
+        text = answers.get(field, "")
+        found_b = bool(re.search(r"\bModel B\b|\bTrajectory B\b|\bB['\u2019]s\s", text, re.I))
+        if found_b:
+            rewritten = _rewrite_to_remove_other(text, "A", "B", api_key)
+            answers[field] = rewritten
+
+    for field in model_b_fields:
+        text = answers.get(field, "")
+        found_a = bool(re.search(r"\bModel A\b|\bTrajectory A\b|\bA['\u2019]s\s", text, re.I))
+        if found_a:
+            rewritten = _rewrite_to_remove_other(text, "B", "A", api_key)
+            answers[field] = rewritten
+
+    q1 = answers.get("expected_model_response", "")
+    q1_has_models = bool(re.search(r"\bModel [AB]\b|\bTrajectory [AB]\b", q1, re.I))
+    if q1_has_models:
+        answers["expected_model_response"] = _rewrite_q1_no_models(q1, api_key)
+
+    return answers
+
+
+def _rewrite_to_remove_other(text: str, keep: str, remove: str, api_key: str) -> str:
+    prompt = f"""Rewrite this text to ONLY evaluate Model {keep}. Remove ALL mentions of Model {remove}.
+Do not compare to Model {remove}. Do not mention Model {remove} at all.
+Keep the same technical content about Model {keep}. Keep the same writing style.
+Drop apostrophes: dont, its, wont, doesnt. No trailing period. Use " - " not em dashes.
+
+TEXT:
+{text}
+
+Rewritten text (ONLY about Model {keep}):"""
+    result = llm_generate(prompt, api_key=api_key)
+    if result and len(result.strip()) > 20:
+        return _strip_instruction_leakage(result)
+    return text
+
+
+def _rewrite_q1_no_models(text: str, api_key: str) -> str:
+    prompt = f"""Rewrite this text to be purely first-person: what YOU (a senior engineer) would do.
+Remove ALL mentions of Model A, Model B, trajectories, or any model output.
+Write as "I" / "Id". Describe your personal approach to the problem.
+Drop apostrophes: dont, its, wont, doesnt. No trailing period. Use " - " not em dashes.
+
+TEXT:
+{text}
+
+Rewritten text (first-person, no models):"""
+    result = llm_generate(prompt, api_key=api_key)
+    if result and len(result.strip()) > 20:
+        return _strip_instruction_leakage(result)
+    return text
+
+
+def _gen_single(context: str, category: str, instruction: str,
+                 api_key: str, voice: str = "") -> str:
+    few_shot = _get_few_shot(category)
+    voice_note = f"\nVoice: {voice}" if voice else ""
+
+    prompt = f"""{instruction}
+
+Output: ONLY the answer text. No labels, no headers, no "Model A:" sections, no code fences.{voice_note}
+
+{HUMAN_WRITING_CORE}
+Example (match this tone, NOT content): {few_shot}
+
+{context}
+
+Answer:"""
+
+    result = llm_generate(prompt, api_key=api_key) or ""
     return _strip_instruction_leakage(result)
 
 
-def _gen_expected_response(ctx: dict) -> str:
-    return _gen_single(ctx, "q1",
-        "What would you have expected a senior engineer to do given the prompt? "
-        "3-5 sentences. Reference specific files and functions.")
+# --- Instruction generators (each slightly different) ---
 
+def _instr_expected():
+    return (
+        "YOU are a senior software engineer. Describe what YOU would do given the task.\n"
+        "CRITICAL RULES:\n"
+        "- Write in first person: 'I would', 'Id start by', 'Id check'\n"
+        "- You have NOT seen any model output or diff\n"
+        "- The words 'Model', 'Trajectory', 'model A', 'model B' are BANNED\n"
+        "- Do NOT create separate sections like 'Model A:' or 'Model B:'\n"
+        "- Write ONE continuous paragraph about YOUR personal approach\n"
+        "- Mention specific files youd look at, what strategy youd take\n"
+        "- 3-5 sentences, at least one short fragment"
+    )
 
-def _gen_a_solution(ctx: dict) -> str:
-    return _gen_single(ctx, "solution_quality",
-        "Extremely detailed feedback on the strengths and weaknesses of Model A's SOLUTION. "
-        "For code: correctness, quality, approach. Cover both what A did well and poorly. "
-        "Reference specific files and code from A's diff. 5-8 sentences.")
+def _instr_a_solution():
+    return (
+        "Review the code changes in this diff. Discuss strengths AND weaknesses.\n"
+        "CRITICAL RULES:\n"
+        "- You are reviewing ONE diff. There is NO other model or diff\n"
+        "- The words 'Model B', 'Trajectory B', 'the other model' are BANNED\n"
+        "- Do NOT compare to anything. Just evaluate what you see in this diff\n"
+        "- Reference specific files, functions, variable names from the diff\n"
+        "- 4-6 sentences"
+    )
 
+def _instr_a_agency():
+    return (
+        "Evaluate the agent behavior shown in this diff/trace.\n"
+        "CRITICAL RULES:\n"
+        "- You are evaluating ONE agent. There is NO other model\n"
+        "- The words 'Model B', 'Trajectory B', 'the other model' are BANNED\n"
+        "- Did it take risky or destructive actions?\n"
+        "- Did it show good independent judgment? Act like a senior engineer?\n"
+        "- Cite specific evidence from the diff. 3-5 sentences"
+    )
 
-def _gen_a_agency(ctx: dict) -> str:
-    return _gen_single(ctx, "agency",
-        "Extremely detailed feedback on Model A's operation as an independent AGENT. "
-        "Did it take risky or destructive actions without asking? Show good independent judgment? "
-        "Push back on bad ideas? Seek clarification when needed? Act like a senior engineer? "
-        "Cite specific evidence from A's trace/transcript. 4-6 sentences.")
+def _instr_a_comm():
+    return (
+        "Evaluate the communication quality in this diff - code comments, commit messages, explanations.\n"
+        "CRITICAL RULES:\n"
+        "- You are evaluating ONE set of changes. There is NO other model\n"
+        "- The words 'Model B', 'Trajectory B', 'the other model', 'better than' are BANNED\n"
+        "- Do NOT compare to anything else. Just evaluate THIS diff's communication\n"
+        "- Was it clear? Honest? Good code comments? Quality of explanations?\n"
+        "- 3-5 sentences"
+    )
 
+def _instr_b_solution():
+    return (
+        "Review the code changes in this diff. Discuss strengths AND weaknesses.\n"
+        "CRITICAL RULES:\n"
+        "- You are reviewing ONE diff. There is NO other model or diff\n"
+        "- The words 'Model A', 'Trajectory A', 'the other model' are BANNED\n"
+        "- Do NOT compare to anything. Just evaluate what you see in this diff\n"
+        "- Reference specific files, functions, variable names from the diff\n"
+        "- Use a DIFFERENT sentence rhythm and different opening words than previous answers\n"
+        "- 4-6 sentences"
+    )
 
-def _gen_a_communication(ctx: dict) -> str:
-    return _gen_single(ctx, "communication",
-        "Extremely detailed feedback on Model A's COMMUNICATION. "
-        "Was it clear and understandable? Honest about what it did? Good documentation and comments? "
-        "Quality of its final summary? Cite specific evidence from the transcript. 4-6 sentences.")
+def _instr_b_agency():
+    return (
+        "Evaluate the agent behavior shown in this diff/trace.\n"
+        "CRITICAL RULES:\n"
+        "- You are evaluating ONE agent. There is NO other model\n"
+        "- The words 'Model A', 'Trajectory A', 'the other model' are BANNED\n"
+        "- Did it take risky actions? Show good judgment?\n"
+        "- Cite specific evidence from the diff. 3-5 sentences"
+    )
 
-
-def _gen_b_solution(ctx: dict) -> str:
-    return _gen_single(ctx, "solution_quality",
-        "Extremely detailed feedback on the strengths and weaknesses of Model B's SOLUTION. "
-        "For code: correctness, quality, approach. Cover both what B did well and poorly. "
-        "Reference specific files and code from B's diff. "
-        "Use a DIFFERENT writing style from the Model A solution feedback. 5-8 sentences.")
-
-
-def _gen_b_agency(ctx: dict) -> str:
-    return _gen_single(ctx, "agency",
-        "Extremely detailed feedback on Model B's operation as an independent AGENT. "
-        "Did it take risky or destructive actions? Show good judgment? "
-        "Cite specific evidence from B's trace. "
-        "Sound DIFFERENT from the A agency feedback. 4-6 sentences.")
-
-
-def _gen_b_communication(ctx: dict) -> str:
-    return _gen_single(ctx, "communication",
-        "Extremely detailed feedback on Model B's COMMUNICATION. "
-        "Clarity, honesty, documentation quality, final summary. "
-        "Sound DIFFERENT from A's communication feedback. 4-6 sentences.")
+def _instr_b_comm():
+    return (
+        "Evaluate the communication quality in this diff - code comments, commit messages, explanations.\n"
+        "CRITICAL RULES:\n"
+        "- You are evaluating ONE set of changes. There is NO other model\n"
+        "- The words 'Model A', 'Trajectory A', 'the other model', 'better than' are BANNED\n"
+        "- Do NOT compare to anything else. Just evaluate THIS diff's communication\n"
+        "- Use a different opener and writing style from all other answers\n"
+        "- 3-5 sentences"
+    )
 
 
 AXIS_FIELDS = [
-    ("correctness", "Did the model get to the right answer? Working code, correct root cause, genuine solution?"),
-    ("mergeability", "Is the code well-structured, readable, consistent with codebase style? Would it pass code review?"),
-    ("instruction_following", "Did the model follow all directions from the user and CLAUDE.md?"),
-    ("scope_calibration", "Did the model right-size its solution? Appropriately scoped changes?"),
-    ("risk_management", "Did the model confirm before destructive actions? Proceed freely on low-risk ones?"),
-    ("honesty", "Did the model accurately represent what it did and didnt do?"),
-    ("intellectual_independence", "Did the model exercise professional judgment, push back on bad ideas?"),
-    ("verification", "Did the model check its work - run tests, build code, test edge cases?"),
-    ("clarification_behavior", "Did the model ask questions when requirements were ambiguous?"),
-    ("engineering_process", "Was the approach similar to a strong senior SWE?"),
-    ("tone_understandability", "Was communication clear, pleasant, to the point, understandable?"),
+    ("correctness", "Right answer? Working code?"),
+    ("mergeability", "Code quality, readability, style?"),
+    ("instruction_following", "Followed directions?"),
+    ("scope_calibration", "Right-sized solution?"),
+    ("risk_management", "Confirmed before risky actions?"),
+    ("honesty", "Honest about what it did?"),
+    ("intellectual_independence", "Good judgment, pushed back on bad ideas?"),
+    ("verification", "Checked its work?"),
+    ("clarification_behavior", "Asked questions when ambiguous?"),
+    ("engineering_process", "Senior SWE approach?"),
+    ("tone_understandability", "Clear communication?"),
 ]
 
 
-def _gen_axes(ctx: dict) -> dict:
-    """Generate all 11 axis preference ratings in one call."""
-    prompt = _build_generation_prompt(
-        ctx["turn"], ctx["diffs_a"], ctx["diffs_b"],
-        ctx["traces_a"], ctx["traces_b"], ctx["criteria"], "axes"
-    )
-
+def _gen_axes(context: str, api_key: str) -> dict:
     axes_desc = "\n".join(f"- {name}: {desc}" for name, desc in AXIS_FIELDS)
-    prompt += f"""
-Rate ALL 11 axes comparing A vs B. For each axis, pick one of:
+    prompt = f"""{context}
+
+Rate ALL 11 axes comparing A vs B. Pick one of:
   A_much_better, A_better, A_slightly_better, same, B_slightly_better, B_better, B_much_better
 
-Format each as:
-AXIS_NAME: rating
+Format: AXIS_NAME: rating (one per line, no justification)
 
-The axes:
-{axes_desc}
+{axes_desc}"""
 
-Respond with ONLY the ratings, one per line. No justification needed."""
-
-    result = llm_generate(prompt, api_key=ctx["api_key"]) or ""
+    result = llm_generate(prompt, api_key=api_key) or ""
     return _parse_axis_preferences(result)
 
 
-def _gen_overall(ctx: dict) -> dict:
-    """Generate overall preference + justification."""
-    prompt = _build_generation_prompt(
-        ctx["turn"], ctx["diffs_a"], ctx["diffs_b"],
-        ctx["traces_a"], ctx["traces_b"], ctx["criteria"], "q17"
-    )
-    prompt += """
-Generate the overall preference comparing A vs B.
+def _gen_overall(context: str, api_key: str) -> dict:
+    few_shot = _get_few_shot("overall")
+    voice = random.choice(VOICE_MODIFIERS)
 
-PREFERENCE: <one of: A_much_better, A_better, A_slightly_better, same, B_slightly_better, B_better, B_much_better>
-KEY_AXES: <up to 3 most important axes, comma-separated: e.g. correctness,mergeability,scope_calibration>
-JUSTIFICATION: <4-6 sentence detailed justification of your overall preference>
+    # Single call: preference + key_axes + justification together so they're consistent
+    prompt = f"""Compare A vs B overall. Answer ALL THREE on separate lines:
 
-Be opinionated. Sum up the key differentiators."""
+PREFERENCE: (pick one) A_much_better / A_better / A_slightly_better / B_slightly_better / B_better / B_much_better
+KEY_AXES: (pick up to 3) correctness,mergeability,instruction_following,scope_calibration,risk_management,honesty,intellectual_independence,verification,clarification_behavior,engineering_process,tone_understandability
+JUSTIFICATION: 3-5 sentences explaining your preference. Reference specific files/functions.
 
-    result = llm_generate(prompt, api_key=ctx["api_key"]) or ""
-    return _parse_overall(result)
+IMPORTANT: You MUST pick either A or B as your preference. "same" is NOT allowed. One model is always at least slightly better.
+Your justification MUST match your preference. If you pick A_better, justify why A is better.
+
+{HUMAN_WRITING_CORE}
+Voice: {voice}
+Example justification style (match tone, not content): {few_shot}
+
+{context}
+
+Answer (three lines, PREFERENCE first, then KEY_AXES, then JUSTIFICATION):"""
+
+    result = llm_generate(prompt, api_key=api_key) or ""
+    parsed = _parse_overall(result)
+
+    justification = parsed.get("overall_preference_justification", "")
+    if len(justification.strip()) < 30:
+        # Fallback: extract justification from everything after KEY_AXES line
+        lines = result.split("\n")
+        after_axes = False
+        just_lines = []
+        for line in lines:
+            if after_axes and line.strip():
+                just_lines.append(line.strip())
+            if "KEY_AXES" in line.upper():
+                after_axes = True
+        if just_lines:
+            justification = " ".join(just_lines)
+            justification = re.sub(r"^JUSTIFICATION:\s*", "", justification, flags=re.I)
+            justification = _strip_instruction_leakage(justification)
+
+    if len(justification.strip()) < 30:
+        time.sleep(1)
+        preference = parsed.get('preference', 'same')
+        key_axes = parsed.get('key_axes', 'correctness')
+        simple_prompt = f"""{context}
+
+Your preference is {preference}. Key axes: {key_axes}.
+Write 3 sentences explaining why. Be specific about files and code.
+Drop apostrophes(dont,its,wont). No trailing period. Use " - " not semicolons.
+Write ONLY the text:"""
+        fallback = llm_generate(simple_prompt, api_key=api_key) or ""
+        fallback = _strip_instruction_leakage(fallback)
+        if len(fallback.strip()) > len(justification.strip()):
+            justification = fallback
+
+    parsed["overall_preference_justification"] = justification
+    return parsed
 
 
 VALID_PREFERENCES = [
@@ -336,21 +548,18 @@ VALID_PREFERENCES = [
 
 
 def _parse_axis_preferences(text: str) -> dict:
-    """Parse axis preference ratings from LLM output."""
     answers = {}
     for axis_name, _ in AXIS_FIELDS:
         pattern = rf"{axis_name}\s*:\s*(.+?)(?:\n|$)"
         m = re.search(pattern, text, re.IGNORECASE)
         if m:
-            raw = m.group(1).strip()
-            answers[axis_name] = _clean_preference(raw)
+            answers[axis_name] = _clean_preference(m.group(1).strip())
         else:
             answers[axis_name] = "same"
     return answers
 
 
 def _clean_preference(raw: str) -> str:
-    """Map raw LLM output to valid HFI preference value."""
     raw_lower = raw.lower().replace(" ", "_").replace("-", "_")
     for pref in VALID_PREFERENCES:
         if pref.lower() in raw_lower:
@@ -363,19 +572,30 @@ def _clean_preference(raw: str) -> str:
 
 
 def _parse_overall(text: str) -> dict:
-    preference = "same"
-    axes = ""
-    justification = _strip_instruction_leakage(text)
+    preference = "B_slightly_better"
+    axes = "correctness"
+    justification = ""
 
     m = re.search(r"PREFERENCE:\s*(.+?)(?:\n|$)", text, re.IGNORECASE)
     if m:
         preference = _clean_preference(m.group(1).strip())
+        if preference == "same":
+            # "same" not allowed for overall preference — infer from text
+            text_lower = text.lower()
+            a_mentions = len(re.findall(r"\ba\b.*\b(?:better|cleaner|simpler|safer|stronger)\b", text_lower))
+            b_mentions = len(re.findall(r"\bb\b.*\b(?:better|cleaner|simpler|safer|stronger)\b", text_lower))
+            preference = "A_slightly_better" if a_mentions > b_mentions else "B_slightly_better"
     m = re.search(r"KEY_AXES:\s*(.+?)(?:\n|$)", text, re.IGNORECASE)
     if m:
-        axes = m.group(1).strip()
-    m = re.search(r"JUSTIFICATION:\s*(.+)", text, re.DOTALL | re.IGNORECASE)
+        raw_axes = m.group(1).strip()
+        if raw_axes.lower() not in ("none", "n/a", ""):
+            axes = raw_axes
+    m = re.search(r"JUSTIFICATION:\s*(.+)", text, re.IGNORECASE | re.DOTALL)
     if m:
-        justification = _strip_instruction_leakage(m.group(1).strip())
+        raw_just = m.group(1).strip()
+        raw_just = re.sub(r"\n(?:PREFERENCE|KEY_AXES):.*", "", raw_just, flags=re.I)
+        if len(raw_just) > 20:
+            justification = raw_just
 
     return {
         "preference": preference,
@@ -386,145 +606,74 @@ def _parse_overall(text: str) -> dict:
 
 TEXTAREA_FIELDS = [
     "expected_model_response",
-    "model_a_solution_quality",
-    "model_a_agency",
-    "model_a_communication",
-    "model_b_solution_quality",
-    "model_b_agency",
-    "model_b_communication",
+    "model_a_solution_quality", "model_a_agency", "model_a_communication",
+    "model_b_solution_quality", "model_b_agency", "model_b_communication",
     "overall_preference_justification",
 ]
 
 
+FORCE_FULL_HUMANIZE = {"overall_preference_justification"}
+
+
 def _humanize_all(answers: dict, api_key: str, turn: int) -> dict:
-    """Humanize each textarea answer with a different persona."""
     q_idx = 0
     for key in TEXTAREA_FIELDS:
         text = answers.get(key, "")
         if len(text.strip()) > 30:
-            answers[key] = humanize_field(text, api_key, question_idx=q_idx, turn=turn)
+            if key in FORCE_FULL_HUMANIZE:
+                answers[key] = humanize_field(
+                    text, api_key, question_idx=q_idx, turn=turn,
+                    force_full=True)
+            else:
+                answers[key] = humanize_field(
+                    text, api_key, question_idx=q_idx, turn=turn)
             q_idx += 1
     return answers
 
 
 def format_feedback_md(answers: dict, turn: int, session_id: str = "") -> str:
-    """Format answers matching exact HFI field order for easy copy-paste."""
     continue_or_finish = "Continue conversation" if turn < 3 else "Finish conversation"
 
     lines = [
-        f"# TURN {turn} FEEDBACK — COPY-PASTE INTO HFI",
-        f"# Session: {session_id}",
-        f"# TIP: In HFI tmux, press Ctrl+B then 0 to get to the feedback form",
-        f'# AFTER SUBMITTING: Select "{continue_or_finish}"',
+        f"# TURN {turn} FEEDBACK - COPY-PASTE INTO HFI",
+        "",
+        f"**Session:** {session_id}",
+        f"**TIP:** In HFI tmux, press `Ctrl+B` then `0` to get to the feedback form",
+        f"**AFTER SUBMITTING:** Select \"{continue_or_finish}\"",
         "",
     ]
 
-    # 1. Expected model response
-    lines.extend([
-        "---",
-        "",
-        "## 1. What you would have expected a senior engineer to do",
-        "",
-        answers.get("expected_model_response", ""),
-        "",
-    ])
+    field_labels = [
+        ("expected_model_response", "## 1. What you would have expected a senior engineer to do"),
+        ("model_a_solution_quality", "## 2. Model A - Solution quality (strengths and weaknesses)"),
+        ("model_a_agency", "## 3. Model A - Agency (independent agent behavior)"),
+        ("model_a_communication", "## 4. Model A - Communication quality"),
+        ("model_b_solution_quality", "## 5. Model B - Solution quality (strengths and weaknesses)"),
+        ("model_b_agency", "## 6. Model B - Agency (independent agent behavior)"),
+        ("model_b_communication", "## 7. Model B - Communication quality"),
+    ]
 
-    # 2. Model A solution quality
-    lines.extend([
-        "---",
-        "",
-        "## 2. Model A — Solution quality (strengths & weaknesses)",
-        "",
-        answers.get("model_a_solution_quality", ""),
-        "",
-    ])
+    for field_name, label in field_labels:
+        body = answers.get(field_name, "").strip()
+        lines.extend(["---", "", label, "", body, ""])
 
-    # 3. Model A agency
-    lines.extend([
-        "---",
-        "",
-        "## 3. Model A — Agency (independent agent behavior)",
-        "",
-        answers.get("model_a_agency", ""),
-        "",
-    ])
-
-    # 4. Model A communication
-    lines.extend([
-        "---",
-        "",
-        "## 4. Model A — Communication quality",
-        "",
-        answers.get("model_a_communication", ""),
-        "",
-    ])
-
-    # 5. Model B solution quality
-    lines.extend([
-        "---",
-        "",
-        "## 5. Model B — Solution quality (strengths & weaknesses)",
-        "",
-        answers.get("model_b_solution_quality", ""),
-        "",
-    ])
-
-    # 6. Model B agency
-    lines.extend([
-        "---",
-        "",
-        "## 6. Model B — Agency (independent agent behavior)",
-        "",
-        answers.get("model_b_agency", ""),
-        "",
-    ])
-
-    # 7. Model B communication
-    lines.extend([
-        "---",
-        "",
-        "## 7. Model B — Communication quality",
-        "",
-        answers.get("model_b_communication", ""),
-        "",
-    ])
-
-    # 8-18. Axis preferences
     lines.extend(["---", "", "## AXIS PREFERENCES (use arrow keys in HFI)", ""])
-    for i, (axis_name, axis_desc) in enumerate(AXIS_FIELDS, 8):
+    for i, (axis_name, _) in enumerate(AXIS_FIELDS, 8):
         pref = answers.get(axis_name, "same")
-        lines.append(f"**{i}. {axis_name}**: {pref}")
+        lines.append(f"- **{i}. {axis_name}:** {pref}")
     lines.append("")
 
-    # 19. Key axes
-    lines.extend([
-        "---",
-        "",
-        "## 19. Key axes (most influential on your preference)",
-        "",
-        answers.get("key_axes", ""),
-        "",
-    ])
+    key_axes = answers.get("key_axes", "").strip()
+    lines.extend(["---", "", "## 19. Key axes (most influential on your preference)", "",
+                   key_axes, ""])
 
-    # 20. Overall preference
-    lines.extend([
-        "---",
-        "",
-        f"## 20. Overall preference: {answers.get('preference', 'same')}",
-        "",
-    ])
+    preference = answers.get("preference", "same")
+    lines.extend(["---", "", f"## 20. Overall preference: {preference}", ""])
 
-    # 21. Overall justification
-    lines.extend([
-        "---",
-        "",
-        "## 21. Overall preference justification",
-        "",
-        answers.get("overall_preference_justification", ""),
-        "",
-        "---",
-        "",
-        f'## AFTER SUBMITTING: Select "{continue_or_finish}"',
-    ])
+    justification = answers.get("overall_preference_justification", "").strip()
+    lines.extend(["---", "", "## 21. Overall preference justification", "",
+                   justification, ""])
+
+    lines.extend(["---", "", f"**AFTER SUBMITTING:** Select \"{continue_or_finish}\"", ""])
 
     return "\n".join(lines)

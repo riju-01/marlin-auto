@@ -15,14 +15,14 @@ You run HFI separately in tmux and copy-paste the pre-generated answers.
 
 ```bash
 # 1. Install deps
-cd /mnt/c/Users/RIJU/Desktop/cognyzer/marlin/marlin-auto
+cd /path/to/marlin-auto
 pip3 install -r requirements.txt
 
 # 2. Set up API key
 cp .env.example .env
 # Edit .env and add at least one LLM key (Gemini, OpenAI, or Claude)
 
-# 3. Place claude-hfi binary (see detailed steps below)
+# 3. Place claude-hfi in HFI/claude-hfi (see Step 4 below)
 
 # 4. Run
 python3 marlin_auto.py
@@ -47,14 +47,14 @@ python3 marlin_auto.py
 From inside **WSL**:
 
 ```bash
-cd /mnt/c/Users/RIJU/Desktop/cognyzer/marlin/marlin-auto
+cd /path/to/marlin-auto
 pip3 install -r requirements.txt
 ```
 
 Or from **Windows PowerShell**:
 
 ```powershell
-cd C:\Users\RIJU\Desktop\cognyzer\marlin\marlin-auto
+cd C:\path\to\marlin-auto
 pip install -r requirements.txt
 ```
 
@@ -96,18 +96,33 @@ distributed by Anthropic and is **not open source**.
 1. **Get the binary** from your Snorkel task instructions, team Slack, or
    Anthropic's distribution channel.
 
-2. **Place it in a known location inside WSL**:
+2. **Put the binary in the `HFI` folder inside this repo** (recommended):
+
+   The repo includes an empty `HFI/` directory (tracked via `.gitkeep`).
+   Copy your downloaded binary there and make it executable:
 
    ```bash
-   mkdir -p ~/marlin-tools
-   cp /path/to/downloaded/claude-hfi ~/marlin-tools/claude-hfi
-   chmod +x ~/marlin-tools/claude-hfi
+   cd /path/to/marlin-auto    # same folder as marlin_auto.py
+   cp /path/to/downloaded/claude-hfi HFI/claude-hfi
+   chmod +x HFI/claude-hfi
    ```
 
-3. **During Phase 3**, the automation automatically searches these locations
-   and copies it into the cloned repo directory:
+   `HFI/claude-hfi` is gitignored so it is never pushed to GitHub.
+
+   **Fallback** (if you prefer not to use `HFI/`): `~/marlin-tools/claude-hfi`,
+   Downloads, `bin/claude-hfi`, etc. See search order below.
+
+3. **During Phase 3**, the automation searches these locations (first match wins)
+   and **copies** the binary into the **cloned task repo** (where you run
+   `./claude-hfi --tmux`). You do **not** run HFI from inside `marlin-auto`;
+   `marlin-auto` only holds your master copy.
+
+   Search order includes:
+   - `<marlin-auto>/HFI/claude-hfi`  (expected location)
+   - `<marlin-auto>/bin/claude-hfi`  (legacy)
    - `~/marlin-tools/claude-hfi`
-   - `~/claude-hfi`
+   - `~/Downloads/claude-hfi` (and common `linux-amd64` download names)
+   - Windows Downloads / Desktop paths under `/mnt/c/Users/...`
    - `~/.local/bin/claude-hfi`
    - `/usr/local/bin/claude-hfi`
 
@@ -115,7 +130,7 @@ distributed by Anthropic and is **not open source**.
    You can also manually copy it after setup:
 
    ```bash
-   cp ~/marlin-tools/claude-hfi /path/to/cloned/repo/claude-hfi
+   cp /path/to/marlin-auto/HFI/claude-hfi /path/to/cloned/repo/claude-hfi
    chmod +x /path/to/cloned/repo/claude-hfi
    ```
 
@@ -295,6 +310,7 @@ marlin-auto/
   hfi_watcher.py            # HFI session polling and diff extraction
   tui.py                    # Rich terminal UI components
   marlin_auto.py            # Main orchestrator (entry point)
+  HFI/                      # Put claude-hfi here (binary gitignored; folder tracked)
   tasks/                    # Per-task artifacts (gitignored)
     <owner>_<repo>_<pr>/
       phase2.md             # Full analysis document
@@ -324,8 +340,9 @@ If using a non-Ubuntu distro, set `WSL_DISTRO=YourDistro` in `.env`.
 **HFI not detected** - Make sure HFI writes results to `/tmp/claude-hfi/`.
 You can always press Enter to proceed manually when prompted.
 
-**claude-hfi binary not found** - Place it in `~/marlin-tools/claude-hfi`
-inside WSL and make it executable: `chmod +x ~/marlin-tools/claude-hfi`
+**claude-hfi binary not found** - Put it at `marlin-auto/HFI/claude-hfi`
+and run `chmod +x HFI/claude-hfi`, or use a fallback path from the README
+search list (e.g. `~/marlin-tools/claude-hfi`).
 
 **AI score too high** - The system retries up to 6 passes. If scores are
 still above 30%, press R when shown answers to regenerate.

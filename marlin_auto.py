@@ -33,7 +33,7 @@ from rich import box as rbox
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import (
-    MARLIN_V2, SCRIPTS_DIR, WORKSPACE, DATA_DIR,
+    MARLIN_V2, SCRIPTS_DIR, WORKSPACE, DATA_DIR, MARLIN_AUTO_DIR, HFI_LOCAL_DIR,
     INTERFACE_CODE, AI_SCORE_TARGET,
 )
 from utils import (
@@ -45,7 +45,6 @@ from pr_fetcher import rank_prs, fetch_pr_diff, parse_pr_url, fetch_and_rank_pr
 from prompt_generator import generate_phase2_doc, format_phase2_md, generate_turn1_prompt
 from turn_prompt_generator import generate_turn_prompt
 from feedback_generator import generate_all_feedback, format_feedback_md
-from humanizer import humanize_feedback_file
 from ai_scorer import score_field, full_validation
 from hfi_watcher import (
     find_session_dir, wait_for_turn, extract_diffs_from_worktrees,
@@ -124,9 +123,11 @@ def _generate_claude_md(repo_dir: str, owner: str, repo: str, pr_data: dict):
 
 def _find_and_copy_hfi(repo_dir: str):
     """Search common locations for the claude-hfi binary and copy it."""
+    local_hfi = f"{HFI_LOCAL_DIR}/claude-hfi"
+    local_bin = f"{MARLIN_AUTO_DIR}/bin/claude-hfi"
     search_script = (
         '#!/bin/bash\n'
-        'for f in ~/marlin-tools/claude-hfi '
+        f'for f in "{local_hfi}" "{local_bin}" '
         '~/Downloads/claude-hfi '
         '~/Downloads/linux-amd64 '
         '~/Downloads/linux-arm64 '
@@ -159,7 +160,9 @@ def _run_setup(task_name: str, pr_data: dict, task_state: str) -> str:
     owner = pr_data["owner"]
     repo = pr_data["repo"]
     base_sha = pr_data["meta"]["base_sha"]
-    wsl_task_dir = f"{MARLIN_V2}/tasks/{task_name}"
+    # Clone to native Linux filesystem to avoid symlink/ENOTSUP issues on /mnt/c/
+    wsl_task_dir = f"$HOME/marlin-tasks/{task_name}"
+    wsl_exec(f"mkdir -p $HOME/marlin-tasks/{task_name}")
 
     SETUP_STEPS = [
         ("Clone repository", 15),
@@ -293,6 +296,12 @@ def _run_setup(task_name: str, pr_data: dict, task_state: str) -> str:
         _, hfi_check, _ = wsl_exec(f"test -x '{repo_dir}/claude-hfi' && echo YES || echo NO")
         if "YES" not in hfi_check:
             _find_and_copy_hfi(repo_dir)
+        # Remove symlinks that break claude-hfi worktree creation (ENOTSUP copyfile)
+        wsl_exec(
+            f"find '{repo_dir}' -type l -name 'lib64' -delete 2>/dev/null; "
+            f"find '{repo_dir}' -maxdepth 3 -type l ! -readable -delete 2>/dev/null; "
+            f"echo 'Cleaned symlinks'"
+        )
         _finish_step(w)
 
         # --- Step 5: Verify artifacts ---
@@ -322,6 +331,8 @@ def _run_setup(task_name: str, pr_data: dict, task_state: str) -> str:
         console.print(Panel(
             "[bold yellow]claude-hfi binary not found![/bold yellow]\n\n"
             "The automation searched these locations:\n"
+            f"  {HFI_LOCAL_DIR}/claude-hfi  [bold](put the binary here)[/bold]\n"
+            f"  {MARLIN_AUTO_DIR}/bin/claude-hfi  (legacy fallback)\n"
             "  ~/marlin-tools/claude-hfi\n"
             "  ~/Downloads/claude-hfi\n"
             "  /mnt/c/Users/*/Downloads/claude-hfi\n\n"
@@ -626,11 +637,19 @@ def main():
 
         hfi_cmds = get_hfi_launch_commands(repo_dir or "<REPO_DIR>", is_continue)
         current_prompt = prompts[turn_num - 1]
-        display_hfi_commands(hfi_cmds, current_prompt)
+        display_hfi_commands(hfi_cmds)
+
+        console.print()
+        console.print(Panel(
+            current_prompt,
+            title=f"[bold]Turn {turn_num} Prompt — Copy and paste into HFI[/bold]",
+            box=rbox.ROUNDED,
+            padding=(1, 2),
+        ))
 
         console.print()
         console.print("[bold]After pasting the prompt into HFI, wait for both trajectories.[/bold]")
-        console.print("[dim]Press Enter when both A and B are done, or let auto-detection find them.[/dim]")
+        console.print("[dim]Auto-detection will find result files, or type 'done' to proceed manually.[/dim]")
 
         session_dir = find_session_dir()
         turn_complete = False
@@ -650,15 +669,29 @@ def main():
             detector = threading.Thread(target=_poll_turn, daemon=True)
             detector.start()
 
-            console.print("[dim]  (Auto-detection running in background. Press Enter to proceed manually.)[/dim]")
-            try:
-                input()
-            except (EOFError, KeyboardInterrupt):
-                pass
+            console.print("[dim]  (Auto-detection running in background. Type [bold]done[/bold] + Enter to proceed manually.)[/dim]")
+            while not detect_thread_done.is_set():
+                try:
+                    user_input = input().strip().lower()
+                    if user_input == "done":
+                        break
+                    if user_input:
+                        console.print("[dim]  Type 'done' when both trajectories are finished.[/dim]")
+                except (EOFError, KeyboardInterrupt):
+                    break
 
             turn_complete = detect_thread_done.is_set()
         else:
-            wait_for_user("Press Enter when Turn is complete...")
+            console.print("[dim]No HFI session detected yet. Type [bold]done[/bold] + Enter when Turn is complete.[/dim]")
+            while True:
+                try:
+                    user_input = input().strip().lower()
+                    if user_input == "done":
+                        break
+                    if user_input:
+                        console.print("[dim]  Type 'done' when both trajectories are finished.[/dim]")
+                except (EOFError, KeyboardInterrupt):
+                    break
             session_dir = find_session_dir()
 
         # Extract diffs
@@ -710,17 +743,11 @@ bash scripts/marlin_review.sh 2>&1
             status_callback=lambda m: print_status(m),
         )
 
-        # Format and save
+        # Format and save (already humanized inside generate_all_feedback)
         feedback_md = format_feedback_md(answers, turn_num)
 
-        # Score the full file
-        print_status("Scoring all answers...")
-        humanized_md, field_scores = humanize_feedback_file(
-            feedback_md, api_key, turn=turn_num
-        )
-
         feedback_path = write_task_file(
-            task_name, f"FEEDBACK_ANSWERS_TURN{turn_num}.md", humanized_md
+            task_name, f"FEEDBACK_ANSWERS_TURN{turn_num}.md", feedback_md
         )
 
         # Display
@@ -743,13 +770,10 @@ bash scripts/marlin_review.sh 2>&1
                     status_callback=lambda m: print_status(m),
                 )
                 feedback_md = format_feedback_md(answers, turn_num)
-                humanized_md, field_scores = humanize_feedback_file(
-                    feedback_md, api_key, turn=turn_num
-                )
                 feedback_path = write_task_file(
-                    task_name, f"FEEDBACK_ANSWERS_TURN{turn_num}.md", humanized_md
+                    task_name, f"FEEDBACK_ANSWERS_TURN{turn_num}.md", feedback_md
                 )
-                display_feedback_answers(answers, field_scores, turn_num)
+                display_feedback_answers(answers, {}, turn_num)
                 display_feedback_file_path(feedback_path)
             else:
                 break

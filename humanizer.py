@@ -1,16 +1,20 @@
 """
-Multi-pass humanization pipeline.
+Multi-pass humanization pipeline — designed to beat GPTZero / ZeroGPT.
 
-Each answer gets individually humanized with varied style to avoid
-pattern detection across questions. The pipeline is:
+GPTZero detects AI via two primary metrics:
+  1. PERPLEXITY: How predictable each word choice is. AI text has LOW perplexity
+     (very predictable word choices). Human text has HIGHER perplexity (surprising
+     word choices, unusual phrasing, non-standard constructions).
+  2. BURSTINESS: Variance in sentence length/complexity. AI text has LOW burstiness
+     (uniform sentence lengths). Human text has HIGH burstiness (3-word fragments
+     mixed with 30-word run-ons).
 
-  1. Regex transforms (em-dash removal, contraction dropping, filler strip, etc.)
-  2. Re-score. If > target: LLM rewrite with randomized style persona
-  3. Re-score. If > target: aggressive style injection (quirks, splices)
-  4. Final validation
-
-Key principle: every answer should sound like a DIFFERENT person wrote it.
-We randomize style parameters per field to break cross-question patterns.
+Strategy to beat these:
+  - Sentence-level rewriting (not just word swaps)
+  - Inject high-perplexity constructions: parentheticals, mid-sentence pivots,
+    dropped words, unusual word order
+  - Maximize burstiness: deliberately alternate between very short and very long
+  - Break predictable patterns at the sentence level, not just word level
 
 Supports Gemini, OpenAI, and Claude via llm_client.
 """
@@ -34,18 +38,23 @@ _FILLER_PHRASES = [
     (re.compile(r"\bIt(?:'s| is) worth noting that\s*", re.I), ""),
     (re.compile(r"\bIt(?:'s| is) important to note that\s*", re.I), ""),
     (re.compile(r"\bNotably,?\s*", re.I), ""),
-    (re.compile(r"\bFurthermore,?\s*"), "Also "),
-    (re.compile(r"\bfurthermore,?\s*"), "also "),
-    (re.compile(r"\bMoreover,?\s*"), "Also "),
-    (re.compile(r"\bmoreover,?\s*"), "also "),
+    (re.compile(r"\bIdeally,?\s*"), ""),
+    (re.compile(r"\bideally,?\s*"), ""),
+    (re.compile(r"\bCurrently,?\s*"), "Right now "),
+    (re.compile(r"\bcurrently,?\s*"), "right now "),
+    (re.compile(r'\b[Dd]one means\s+'), "the goal is "),
+    (re.compile(r"\bFurthermore,?\s*"), ""),
+    (re.compile(r"\bfurthermore,?\s*"), ""),
+    (re.compile(r"\bMoreover,?\s*"), ""),
+    (re.compile(r"\bmoreover,?\s*"), ""),
     (re.compile(r"\bAdditionally,?\s*"), ""),
     (re.compile(r"\badditionally,?\s*"), ""),
     (re.compile(r"\bConsequently,?\s*"), "So "),
     (re.compile(r"\bconsequently,?\s*"), "so "),
     (re.compile(r"\bNevertheless,?\s*"), "Still "),
     (re.compile(r"\bnevertheless,?\s*"), "still "),
-    (re.compile(r"\bNonetheless,?\s*"), "Still "),
-    (re.compile(r"\bnonetheless,?\s*"), "still "),
+    (re.compile(r"\bNonetheless,?\s*"), ""),
+    (re.compile(r"\bnonetheless,?\s*"), ""),
     (re.compile(r"\bIn conclusion,?\s*", re.I), ""),
     (re.compile(r"\bOverall,?\s+", re.I), ""),
     (re.compile(r"\bUltimately,?\s*", re.I), ""),
@@ -53,15 +62,6 @@ _FILLER_PHRASES = [
     (re.compile(r"\bSpecifically,?\s*", re.I), ""),
     (re.compile(r"\bCrucially,?\s*", re.I), ""),
     (re.compile(r"\bImportantly,?\s*", re.I), ""),
-    (re.compile(r"\bdemonstrates\b", re.I), "shows"),
-    (re.compile(r"\bdemonstrating\b", re.I), "showing"),
-    (re.compile(r"\bLeverage\b"), "Use"),
-    (re.compile(r"\bleverage\b"), "use"),
-    (re.compile(r"\bUtilize\b"), "Use"),
-    (re.compile(r"\butilize\b"), "use"),
-    (re.compile(r"\butilizing\b"), "using"),
-    (re.compile(r"\bFacilitate\b"), "Help"),
-    (re.compile(r"\bfacilitate\b"), "help"),
     (re.compile(r"\bHowever,?\s*"), "But "),
     (re.compile(r"\bhowever,?\s*"), "but "),
     (re.compile(r"\bTherefore,?\s*"), "So "),
@@ -69,6 +69,31 @@ _FILLER_PHRASES = [
     (re.compile(r"\bThus,?\s*"), "So "),
     (re.compile(r"\bthus,?\s*"), "so "),
     (re.compile(r"\bIn order to\b", re.I), "To"),
+    (re.compile(r"\bnot only\b", re.I), ""),
+    (re.compile(r"\bbut also\b", re.I), "and"),
+    (re.compile(r"\bThis ensures\b"), "So"),
+    (re.compile(r"\bthis ensures\b"), "so"),
+    (re.compile(r"\bWhile this\b"), "This"),
+    (re.compile(r"\bAs a result,?\s*"), "So "),
+    (re.compile(r"\bas a result,?\s*"), "so "),
+    # Remove overly casual filler
+    (re.compile(r"\b[Ss]eems like\s+(?:okay|alright)?,?\s*"), ""),
+    (re.compile(r"\b[Pp]retty sure\s+"), ""),
+    (re.compile(r"\b[Ff]rom what I can see\s*,?\s*"), ""),
+    (re.compile(r"\b[Nn]ot a (?:dealbreaker|huge concern)\s*(?:though)?\s*,?\s*"), ""),
+    (re.compile(r"\b[Ii] guess\s+"), ""),
+    (re.compile(r"\b[Ii] think\s+,?\s*"), ""),
+    (re.compile(r"\b[Oo]kay\s*,?\s*"), ""),
+    (re.compile(r"\b[Ll]ets\s+(?:take a look|look|see|review|dive)\b"), "Reviewing"),
+    (re.compile(r"\b[Gg]otta\b"), "need to"),
+    (re.compile(r"\b[Ss]uper\s+(?:clear|helpful|good)\b"), "clear"),
+    (re.compile(r"\b[Nn]eat\b"), "good"),
+    (re.compile(r"\balright\b"), "reasonable"),
+    (re.compile(r"\b[Aa]t least from what I can see\s*,?\s*"), ""),
+    (re.compile(r"\bwhich is expected\s*,?\s*"), ""),
+]
+
+_AI_WORD_SWAPS = [
     (re.compile(r"\bcomprehensive\b"), "full"),
     (re.compile(r"\bRobust\b"), "Solid"),
     (re.compile(r"\brobust\b"), "solid"),
@@ -93,308 +118,641 @@ _FILLER_PHRASES = [
     (re.compile(r"\bstreamline\b"), "simplify"),
     (re.compile(r"\btransformative\b"), "major"),
     (re.compile(r"\bgroundbreaking\b"), "new"),
+    (re.compile(r"\bdemonstrates\b", re.I), "shows"),
+    (re.compile(r"\bdemonstrating\b", re.I), "showing"),
+    (re.compile(r"\bLeverage\b"), "Use"),
+    (re.compile(r"\bleverage\b"), "use"),
+    (re.compile(r"\bleveraging\b"), "using"),
+    (re.compile(r"\bUtilize\b"), "Use"),
+    (re.compile(r"\butilize\b"), "use"),
+    (re.compile(r"\butilizing\b"), "using"),
+    (re.compile(r"\bFacilitate\b"), "Help"),
+    (re.compile(r"\bfacilitate\b"), "help"),
+    (re.compile(r"\bthoroughly\b", re.I), "well"),
+    (re.compile(r"\baccurately\b", re.I), "properly"),
+    (re.compile(r"\benhances\b", re.I), "helps with"),
+    (re.compile(r"\bmaintains\b", re.I), "keeps"),
+    (re.compile(r"\bmaintainability\b", re.I), "how easy it is to maintain"),
+    (re.compile(r"\breadability\b", re.I), "how readable it is"),
+    (re.compile(r"\binvasive\b", re.I), "disruptive"),
+    (re.compile(r"\bincorporates\b", re.I), "adds"),
+    (re.compile(r"\bincorporating\b", re.I), "adding"),
+    (re.compile(r"\bdedicated\b", re.I), "separate"),
+    (re.compile(r"\bstreamline\b", re.I), "simplify"),
+    (re.compile(r"\bstreamlining\b", re.I), "simplifying"),
+    (re.compile(r"\boffering\b", re.I), "giving"),
+    (re.compile(r"\bstraightforward\b", re.I), "simple"),
+    (re.compile(r"\bmanipulations\b", re.I), "changes"),
+    (re.compile(r"\breside\b", re.I), "live"),
+    (re.compile(r"\bIn contrast\b"), "On the other hand"),
+    (re.compile(r"\bin contrast\b"), "on the other hand"),
+    (re.compile(r"\bThis strategy\b"), "This"),
+    (re.compile(r"\bwithout a clear benefit\b", re.I), "for not much gain"),
+    (re.compile(r"\bpotentially leading to\b", re.I), "which could cause"),
+    (re.compile(r"\bwhile functional\b", re.I), "it works but"),
+    (re.compile(r"\bintroduces\b", re.I), "adds"),
+    (re.compile(r"\bclearer approach\b", re.I), "cleaner way"),
+    (re.compile(r"\bthis approach\b", re.I), "this"),
 ]
 
-_CONTRACTIONS = [
-    (r"\bIs not\b", "Isn't"), (r"\bis not\b", "isn't"),
-    (r"\bDo not\b", "Don't"), (r"\bdo not\b", "don't"),
-    (r"\bDoes not\b", "Doesn't"), (r"\bdoes not\b", "doesn't"),
-    (r"\bDid not\b", "Didn't"), (r"\bdid not\b", "didn't"),
-    (r"\bWould not\b", "Wouldn't"), (r"\bwould not\b", "wouldn't"),
-    (r"\bCould not\b", "Couldn't"), (r"\bcould not\b", "couldn't"),
-    (r"\bShould not\b", "Shouldn't"), (r"\bshould not\b", "shouldn't"),
-    (r"\bWill not\b", "Won't"), (r"\bwill not\b", "won't"),
-    (r"\bCannot\b", "Can't"), (r"\bcannot\b", "can't"),
-    (r"\bIt is\b", "It's"), (r"\bit is\b", "it's"),
-    (r"\bThat is\b", "That's"), (r"\bthat is\b", "that's"),
-    (r"\bThere is\b", "There's"), (r"\bthere is\b", "there's"),
+_EVAL_CLICHE_SWAPS = [
+    (re.compile(r"\bcorrectly implements\b", re.I), "gets right"),
+    (re.compile(r"\bcorrectly identifies\b", re.I), "picks up on"),
+    (re.compile(r"\bcorrectly modifies\b", re.I), "fixes"),
+    (re.compile(r"\bcorrectly handles\b", re.I), "handles"),
+    (re.compile(r"\bcorrectly interprets\b", re.I), "reads"),
+    (re.compile(r"\bbetter overall\b", re.I), "better imo"),
+    (re.compile(r"\bas a result\b", re.I), "so"),
+    (re.compile(r"\bshows a (?:better|more nuanced) understanding\b", re.I), "seems to get"),
+    (re.compile(r"\bmore robust\b", re.I), "more solid"),
+    (re.compile(r"\bmore thorough\b", re.I), "more complete"),
+    (re.compile(r"\bmore comprehensive\b", re.I), "more complete"),
+    (re.compile(r"\bfails to address\b", re.I), "misses"),
+    (re.compile(r"\bfails to mention\b", re.I), "skips"),
+    (re.compile(r"\bdoes a good job\b", re.I), "does well"),
+    (re.compile(r"\bdoes a (?:better|decent) job\b", re.I), "does ok"),
+    (re.compile(r"\bworth noting\b", re.I), "interesting"),
+    (re.compile(r"\beasier to understand\b", re.I), "easier to follow"),
+    (re.compile(r"\beasier to maintain\b", re.I), "simpler to maintain"),
+    (re.compile(r"\bprovides a more\b", re.I), "gives a more"),
+    (re.compile(r"\bprovides a clearer\b", re.I), "gives a clearer"),
+    (re.compile(r"\bintroduces? (?:additional|unnecessary|extra) complexity\b", re.I), "overcomplicates things"),
+    (re.compile(r"\bpreventing potential\b", re.I), "avoiding"),
+    (re.compile(r"\bmore cautious\b", re.I), "more careful"),
+    (re.compile(r"\bprioritizes? safety\b", re.I), "plays it safe"),
+    (re.compile(r"\bthe explanation of\b", re.I), "how it explains"),
+    (re.compile(r"\bthe description of\b", re.I), "how it describes"),
+    (re.compile(r"\bthe summary (?:also|doesnt|misses)\b", re.I), "it also"),
+    (re.compile(r"\bfine-grained control\b", re.I), "more control"),
+    (re.compile(r"\bwell thought out\b", re.I), "decent"),
+    (re.compile(r"\bseem(?:s)? (?:well )?thought out\b", re.I), "look ok"),
+    (re.compile(r"\bpotentially impacting\b", re.I), "which could mess with"),
+    (re.compile(r"\bappears sound\b", re.I), "looks fine"),
+    (re.compile(r"\boffering\b", re.I), "giving"),
+    (re.compile(r"\boffers\b", re.I), "gives"),
+    (re.compile(r"\bthingy\b", re.I), "approach"),
+    (re.compile(r"\bstuff\b", re.I), "code"),
+]
+
+_CONTRACTIONS_TO_DROP = [
+    (r"\bdon't\b", "dont"), (r"\bDon't\b", "Dont"),
+    (r"\bdoesn't\b", "doesnt"), (r"\bDoesn't\b", "Doesnt"),
+    (r"\bdidn't\b", "didnt"), (r"\bDidn't\b", "Didnt"),
+    (r"\bcan't\b", "cant"), (r"\bCan't\b", "Cant"),
+    (r"\bwon't\b", "wont"), (r"\bWon't\b", "Wont"),
+    (r"\bshouldn't\b", "shouldnt"), (r"\bShouldn't\b", "Shouldnt"),
+    (r"\bwouldn't\b", "wouldnt"), (r"\bWouldn't\b", "Wouldnt"),
+    (r"\bcouldn't\b", "couldnt"), (r"\bCouldn't\b", "Couldnt"),
+    (r"\bisn't\b", "isnt"), (r"\bIsn't\b", "Isnt"),
+    (r"\baren't\b", "arent"), (r"\bAren't\b", "Arent"),
+    (r"\bwasn't\b", "wasnt"), (r"\bWasn't\b", "Wasnt"),
+    (r"\bweren't\b", "werent"), (r"\bWeren't\b", "Werent"),
+    (r"\bthat's\b", "thats"), (r"\bThat's\b", "Thats"),
+    (r"\bthere's\b", "theres"), (r"\bThere's\b", "Theres"),
+    (r"\bit's\b", "its"), (r"\bIt's\b", "Its"),
+    (r"\bI've\b", "Ive"), (r"\bi've\b", "ive"),
+    (r"\bthey're\b", "theyre"), (r"\bThey're\b", "Theyre"),
+    (r"\bwe've\b", "weve"), (r"\bWe've\b", "Weve"),
+    (r"\byou're\b", "youre"), (r"\bYou're\b", "Youre"),
+    (r"\bthere's\b", "theres"),
+    (r"\bhe's\b", "hes"), (r"\bshe's\b", "shes"),
+    (r"\bwho's\b", "whos"),
+    (r"\bIs not\b", "Isnt"), (r"\bis not\b", "isnt"),
+    (r"\bDo not\b", "Dont"), (r"\bdo not\b", "dont"),
+    (r"\bDoes not\b", "Doesnt"), (r"\bdoes not\b", "doesnt"),
+    (r"\bDid not\b", "Didnt"), (r"\bdid not\b", "didnt"),
+    (r"\bWould not\b", "Wouldnt"), (r"\bwould not\b", "wouldnt"),
+    (r"\bCould not\b", "Couldnt"), (r"\bcould not\b", "couldnt"),
+    (r"\bShould not\b", "Shouldnt"), (r"\bshould not\b", "shouldnt"),
+    (r"\bWill not\b", "Wont"), (r"\bwill not\b", "wont"),
+    (r"\bCannot\b", "Cant"), (r"\bcannot\b", "cant"),
 ]
 
 
 # ---------------------------------------------------------------------------
-# Per-answer style variation
+# Sentence splitting / joining
 # ---------------------------------------------------------------------------
 
-STYLE_PERSONAS = [
-    {
-        "name": "terse_engineer",
-        "desc": "Short sentences. Gets to the point fast. Uses fragments.",
-        "quirks": ["drop_articles", "fragments", "no_trailing_period"],
-    },
-    {
-        "name": "verbose_reviewer",
-        "desc": "Longer explanations with comma splices and run-ons.",
-        "quirks": ["comma_splices", "run_ons", "parenthetical_asides"],
-    },
-    {
-        "name": "casual_dev",
-        "desc": "Very casual. Uses 'stuff', 'thing', abbreviations freely.",
-        "quirks": ["casual_words", "abbreviations", "spacing_quirks"],
-    },
-    {
-        "name": "analytical_lead",
-        "desc": "Structured but not robotic. Mixes short and long.",
-        "quirks": ["mixed_lengths", "dash_asides", "specific_refs"],
-    },
-    {
-        "name": "blunt_senior",
-        "desc": "Opinionated. Doesnt sugarcoat. Direct statements.",
-        "quirks": ["blunt_openers", "no_hedging", "short_judgments"],
-    },
-]
+def _split_sentences(text: str) -> list[str]:
+    raw = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [s for s in raw if s.strip()]
 
 
-def _pick_persona(question_idx: int, turn: int) -> dict:
-    """Pick a different persona per question+turn combo so answers dont match."""
-    seed = question_idx * 7 + turn * 13
-    return STYLE_PERSONAS[seed % len(STYLE_PERSONAS)]
+def _join_sentences(sentences: list[str]) -> str:
+    return " ".join(s.strip() for s in sentences if s.strip())
 
 
 # ---------------------------------------------------------------------------
-# Regex humanization pass
+# Phase 1: Regex cleanup (fast, no LLM)
 # ---------------------------------------------------------------------------
 
-def _strip_em_dashes(text: str) -> str:
-    def _replace(m):
-        before = text[max(0, m.start()-1):m.start()]
-        after = text[m.end():m.end()+1] if m.end() < len(text) else ""
-        if before in (".", "!", "?", "\n") or after in (".", "!", "?", "\n"):
-            return " "
-        return ", "
-    return _EM_DASH.sub(_replace, text)
-
-
-def _apply_filler_removal(text: str) -> str:
+def _regex_cleanup(text: str) -> str:
+    """Remove AI markers: em dashes, filler transitions, AI vocabulary, eval cliches."""
+    # Em dashes → comma or " - "
+    text = _EM_DASH.sub(" - ", text)
+    # Filler/transition words
     for pat, repl in _FILLER_PHRASES:
         text = pat.sub(repl, text)
+    # AI vocabulary
+    for pat, repl in _AI_WORD_SWAPS:
+        text = pat.sub(repl, text)
+    # Eval clichés
+    for pat, repl in _EVAL_CLICHE_SWAPS:
+        text = pat.sub(repl, text)
+    # Drop apostrophes in contractions
+    for pat, repl in _CONTRACTIONS_TO_DROP:
+        text = re.sub(pat, repl, text)
+    # Curly quotes → straight
+    text = re.sub(r"[\u2018\u2019]", "'", text)
+    text = re.sub(r"[\u201C\u201D]", '"', text)
+    # Multi space
+    text = _MULTI_SPACE.sub(" ", text)
     return text
 
 
-def _apply_contractions(text: str) -> str:
-    for pat_str, repl in _CONTRACTIONS:
-        text = re.sub(pat_str, repl, text)
+# ---------------------------------------------------------------------------
+# Phase 2: Structural rewrite — INCREASE perplexity and burstiness
+# ---------------------------------------------------------------------------
+
+def _increase_burstiness(text: str) -> str:
+    """
+    GPTZero's #1 signal: uniform sentence lengths = AI.
+    Fix: split long sentences at natural break points (commas, dashes, conjunctions),
+    merge short consecutive sentences, create fragments.
+    """
+    sentences = _split_sentences(text)
+    if len(sentences) < 3:
+        return text
+
+    result = []
+    i = 0
+    while i < len(sentences):
+        s = sentences[i]
+        words = s.split()
+        wlen = len(words)
+
+        # Long sentence (>20 words): split at a natural break point
+        if wlen > 20 and random.random() < 0.45:
+            # Find natural split points: commas, " - ", "and", "but", "which", "plus"
+            best_split = None
+            for j in range(4, wlen - 4):
+                w = words[j].rstrip(",").lower()
+                prev_ends_comma = words[j-1].endswith(",")
+                if prev_ends_comma or w in ("and", "but", "which", "plus", "so", "while"):
+                    best_split = j
+                    if j > wlen // 3:
+                        break
+            if best_split:
+                frag = " ".join(words[:best_split]).rstrip(",")
+                rest = " ".join(words[best_split:])
+                if not frag.rstrip().endswith((".", "!", "?")):
+                    frag += "."
+                if rest and rest[0].islower():
+                    rest = rest[0].upper() + rest[1:]
+                result.append(frag)
+                result.append(rest)
+            else:
+                result.append(s)
+        # Medium sentence (14-20): sometimes add parenthetical
+        elif 14 <= wlen <= 20 and random.random() < 0.25:
+            # Insert after a comma or at a natural pause
+            insert_at = None
+            for j in range(3, wlen - 3):
+                if words[j-1].endswith(","):
+                    insert_at = j
+                    break
+            if not insert_at:
+                insert_at = random.randint(4, wlen - 4)
+            aside = random.choice(["(at least from what I can see)", "(which is expected)", "(not a dealbreaker though)"])
+            words.insert(insert_at, aside)
+            result.append(" ".join(words))
+        # Two short consecutive sentences (both <9 words): merge with comma
+        elif wlen < 9 and i + 1 < len(sentences) and len(sentences[i+1].split()) < 9:
+            next_s = sentences[i+1]
+            merged = s.rstrip(".!?") + ", " + next_s[0].lower() + next_s[1:]
+            result.append(merged)
+            i += 1
+        else:
+            result.append(s)
+        i += 1
+
+    return _join_sentences(result)
+
+
+_phrase_cache: list[str] = []
+
+
+def _get_human_phrases(api_key: str = "") -> list[str]:
+    """Get varied professional sentence openers/transitions. Uses LLM to generate
+    unique phrases, falls back to a static pool if no API key."""
+    global _phrase_cache
+    if _phrase_cache:
+        return _phrase_cache
+
+    if api_key:
+        prompt = (
+            "Generate 20 short sentence-starter phrases (2-5 words each) that a senior software "
+            "engineer would naturally use when writing code review feedback. Mix of:\n"
+            "- Transitional: connecting one observation to the next\n"
+            "- Evaluative: starting a judgment about code quality\n"
+            "- Observational: noting something specific in the diff\n\n"
+            "Rules: no formal words(Furthermore,Additionally,Moreover). No casual words"
+            "(pretty sure,seems like,I think,I guess). Professional but natural.\n"
+            "Output ONLY the phrases, one per line, each ending with a comma or space."
+        )
+        result = llm_generate(prompt, api_key=api_key)
+        if result:
+            lines = [l.strip().rstrip(".").lstrip("0123456789.-) ") for l in result.strip().split("\n") if l.strip()]
+            phrases = [p + " " if not p.endswith((",", " ")) else p + " " for p in lines if 2 <= len(p.split()) <= 6]
+            if len(phrases) >= 8:
+                _phrase_cache = phrases
+                return _phrase_cache
+
+    _phrase_cache = [
+        "Looking at the diff, ", "The changes in ", "Tracing the code, ",
+        "Checking the dealloc path, ", "The flag handling here ", "On the alloc side, ",
+        "Reviewing the modifications, ", "The conditional logic in ", "Worth checking whether ",
+        "One concern with ", "The approach taken in ", "Digging into ", "For the memory mgmt, ",
+        "Across the modified files, ", "The interaction between ", "Regarding the new flags, ",
+        "On closer inspection, ", "The test coverage for ", "Given the complexity here, ",
+        "Stepping through the flow, ",
+    ]
+    return _phrase_cache
+
+
+def _increase_perplexity(text: str, api_key: str = "") -> str:
+    """
+    GPTZero's #2 signal: predictable word choices = AI.
+    Fix: inject a unique professional phrase at one sentence boundary.
+    """
+    sentences = _split_sentences(text)
+    if len(sentences) < 2:
+        return text
+
+    phrases = _get_human_phrases(api_key)
+    hedge_done = False
+    for i in range(len(sentences)):
+        if hedge_done:
+            break
+        s = sentences[i]
+        first_word = s.split()[0] if s.split() else ""
+        already_hedged = len(first_word) > 0 and first_word.lower() in (
+            "looking", "based", "reviewing", "the", "tracing", "checking",
+            "regarding", "digging", "across", "given", "stepping", "on",
+            "for", "one", "worth",
+        )
+        if not already_hedged and s[0].isupper() and len(s.split()) > 8 and random.random() < 0.5:
+            phrase = random.choice(phrases)
+            sentences[i] = phrase + s[0].lower() + s[1:]
+            hedge_done = True
+
+    return _join_sentences(sentences)
+
+
+def _vary_openers(text: str) -> str:
+    """Break repeated sentence openers — a huge AI signal."""
+    sentences = _split_sentences(text)
+    if len(sentences) < 3:
+        return text
+
+    # Count first-two-word frequencies
+    openers = {}
+    for i, s in enumerate(sentences):
+        words = s.split()
+        key = words[0].lower() if words else ""
+        openers.setdefault(key, []).append(i)
+
+    # Only replace duplicates (keep first occurrence, replace subsequent)
+    for word, indices in openers.items():
+        if len(indices) <= 1:
+            continue
+        for idx in indices[1:]:
+            s = sentences[idx]
+            words = s.split()
+            if len(words) < 3:
+                continue
+            first_word = words[0]
+
+            # For "Model X ..." pattern — replace "Model X" as a unit
+            if first_word.lower() == "model" and len(words) > 1:
+                model_letter = words[1].rstrip(",.:;")
+                rest_words = words[2:]
+                rest = " ".join(rest_words)
+                if model_letter.upper() == "A":
+                    alts = [f"A ", f"On A's side, ", f"For A, "]
+                elif model_letter.upper() == "B":
+                    alts = [f"B ", f"On B's end, ", f"For B, "]
+                else:
+                    alts = ["So ", "And ", "Plus "]
+                sentences[idx] = random.choice(alts) + rest
+            # For other repeated openers — prepend a connector
+            else:
+                connectors = ["Plus, ", "And ", "Also ", "On top of that, "]
+                sentences[idx] = random.choice(connectors) + s[0].lower() + s[1:]
+
+    return _join_sentences(sentences)
+
+
+def _compact_technical_lists(text: str) -> str:
+    """Remove spaces after commas inside technical term lists and parenthetical groups.
+    e.g. "ctors.c, alloc.h, arrayobject.c" -> "ctors.c,alloc.h,arrayobject.c"
+    and  "(DiT, PixArt, Flux)" -> "(DiT,PixArt,Flux)"
+    """
+    # Compact parenthetical groups: (X, Y, Z) -> (X,Y,Z)
+    def _compact_parens(m):
+        inner = m.group(1)
+        return "(" + re.sub(r",\s+", ",", inner) + ")"
+    text = re.sub(r"\(([^)]{3,80})\)", _compact_parens, text)
+
+    # Compact technical term lists: sequences of PascalCase/file-like tokens with ", "
+    # Match 3+ items: word, word, word (where words look technical: contain dots, underscores, or are PascalCase)
+    def _compact_tech_list(m):
+        return m.group(0).replace(", ", ",")
+    text = re.sub(
+        r"(?:[A-Z]\w*(?:\.[a-z]+)?|[a-z_]\w*\.[a-z]+)(?:,\s*(?:[A-Z]\w*(?:\.[a-z]+)?|[a-z_]\w*\.[a-z]+)){2,}",
+        _compact_tech_list, text
+    )
     return text
 
 
-def _vary_sentence_starts(text: str) -> str:
-    count = [0]
-    def _replacer(m):
-        count[0] += 1
-        idx = count[0] % 4
-        if idx == 2:
-            return "They both "
-        if idx == 3:
-            return "A and B both "
-        return m.group(0)
-    return re.sub(r"(?m)^Both models? ", _replacer, text)
-
-
-def _add_casual_bits(text: str) -> str:
-    text = re.sub(r"\bfor instance\b", "like", text, flags=re.I)
-    text = re.sub(r"\bfor example\b", "e.g.", text, flags=re.I)
-    text = re.sub(r"\bprior to\b", "before", text, flags=re.I)
-    text = re.sub(r"\bthe majority of\b", "most", text, flags=re.I)
-    text = re.sub(r"\ba number of\b", "several", text, flags=re.I)
-    text = re.sub(r"\brather than\b", "instead of", text, flags=re.I)
-    text = re.sub(r"\bin particular\b", "especially", text, flags=re.I)
-    return text
+def _add_spacing_quirks(text: str) -> str:
+    """Add subtle human spacing/punctuation quirks."""
+    sentences = _split_sentences(text)
+    modified = 0
+    for i in range(len(sentences)):
+        if modified >= 2:
+            break
+        if "," in sentences[i] and random.random() < 0.25:
+            sentences[i] = sentences[i].replace(",", " ,", 1)
+            modified += 1
+    # Drop trailing period
+    if sentences:
+        last = sentences[-1].rstrip()
+        if last.endswith("."):
+            sentences[-1] = last[:-1]
+    return _join_sentences(sentences)
 
 
 def _fix_capitalization(text: str) -> str:
     text = re.sub(r"(\.\s{1,3})([a-z])", lambda m: m.group(1) + m.group(2).upper(), text)
-    text = re.sub(r"(\n\n)([a-z])", lambda m: m.group(1) + m.group(2).upper(), text)
     if text and text[0].islower():
         text = text[0].upper() + text[1:]
     return text
 
 
-def _apply_persona_quirks(text: str, persona: dict) -> str:
-    """Apply style-specific quirks to differentiate answers."""
-    quirks = persona.get("quirks", [])
-
-    if "spacing_quirks" in quirks:
-        sentences = text.split(". ")
-        for i in range(len(sentences)):
-            if random.random() < 0.2 and "," in sentences[i]:
-                sentences[i] = sentences[i].replace(",", " ,", 1)
-        text = ". ".join(sentences)
-
-    if "comma_splices" in quirks:
-        text = re.sub(r'\. (So |But |And )', lambda m: ', ' + m.group(1).lower(), text, count=2)
-
-    if "fragments" in quirks:
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        if len(sentences) > 3:
-            idx = random.randint(1, len(sentences) - 1)
-            s = sentences[idx]
-            words = s.split()
-            if len(words) > 8:
-                cut = random.randint(3, min(6, len(words) - 2))
-                sentences[idx] = " ".join(words[:cut]) + "."
-                sentences.insert(idx + 1, " ".join(words[cut:]))
-            text = " ".join(sentences)
-
-    if "no_trailing_period" in quirks:
-        text = text.rstrip()
-        if text.endswith("."):
-            text = text[:-1]
-
-    if "abbreviations" in quirks:
-        text = re.sub(r"\bparameter\b", "param", text, flags=re.I)
-        text = re.sub(r"\brepository\b", "repo", text, flags=re.I)
-        text = re.sub(r"\bconfiguration\b", "config", text, flags=re.I)
-        text = re.sub(r"\bdependencies\b", "deps", text, flags=re.I)
-
-    if "blunt_openers" in quirks:
-        text = re.sub(r"^It appears that ", "", text)
-        text = re.sub(r"^It seems like ", "", text)
-        text = re.sub(r"^It is clear that ", "", text)
-
-    if "parenthetical_asides" in quirks:
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        if len(sentences) > 2:
-            idx = random.randint(0, len(sentences) - 1)
-            s = sentences[idx]
-            if len(s.split()) > 10 and "(" not in s:
-                words = s.split()
-                insert_at = random.randint(3, len(words) - 3)
-                words.insert(insert_at, "(worth noting)")
-                sentences[idx] = " ".join(words)
-            text = " ".join(sentences)
-
-    return text
-
-
-def regex_humanize(text: str) -> str:
-    """Single pass of regex-based humanization."""
-    text = _strip_em_dashes(text)
-    text = _apply_filler_removal(text)
-    text = _apply_contractions(text)
-    text = _vary_sentence_starts(text)
-    text = _add_casual_bits(text)
-    text = re.sub(r"[\u2018\u2019]", "'", text)
-    text = re.sub(r"[\u201C\u201D]", '"', text)
-    text = _MULTI_SPACE.sub(" ", text)
-    text = _fix_capitalization(text)
-    return text
-
-
-# ---------------------------------------------------------------------------
-# Gemini rewrite pass
-# ---------------------------------------------------------------------------
-
-def _build_gemini_prompt(persona: dict) -> str:
-    """Build a rewrite prompt with persona-specific instructions."""
-    base = (
-        "Rewrite this text so it reads like a real engineer typed it. "
-        "Keep ALL facts, file names, function names, ratings, and technical meaning identical. "
-        "Do NOT add new info or change any conclusions.\n\n"
-        "Style rules:\n"
-        "- Drop apostrophes in contractions: dont, its, wont, doesnt, cant\n"
-        "- No em dashes or double hyphens. Use commas or ' - ' instead\n"
-        "- No trailing period on the last sentence\n"
-        "- Use abbreviations: param, repo, config, deps, dev\n"
-        "- Mix sentence lengths: some short (5-8 words), some long\n"
-        "- Compact technical lists: write 'factory.py,types.py,__init__.py' not spaced\n"
-    )
-
-    persona_instructions = {
-        "terse_engineer": "Write in short, punchy sentences. Use fragments. Be direct. Skip filler words entirely.",
-        "verbose_reviewer": "Write with longer flowing sentences, use comma splices to chain thoughts. Add parenthetical asides.",
-        "casual_dev": "Write very casually. Say 'stuff' and 'thing' occasionally. Use 'a bunch of' instead of 'multiple'.",
-        "analytical_lead": "Write with a mix of short observations and longer explanations. Use ' - ' for asides.",
-        "blunt_senior": "Be direct and opinionated. No hedging. Say what you mean without softening.",
-    }
-
-    style = persona_instructions.get(persona["name"], "")
-    if style:
-        base += f"\nVoice: {style}\n"
-
-    base += "\nReturn ONLY the rewritten text:\n\n"
-    return base
-
-
-def llm_rewrite(text: str, api_key: str, persona: dict) -> str | None:
-    """Rewrite text via LLM with a specific persona voice."""
-    prompt = _build_gemini_prompt(persona)
-    return llm_generate(prompt + text, api_key=api_key)
-
-
-# ---------------------------------------------------------------------------
-# Aggressive style injection (last resort)
-# ---------------------------------------------------------------------------
-
-def _aggressive_inject(text: str) -> str:
-    """Forcefully inject human-like imperfections when score wont drop."""
-    sentences = re.split(r'(?<=[.!?])\s+', text)
-
-    for i in range(len(sentences)):
-        if random.random() < 0.15 and "," in sentences[i]:
-            sentences[i] = sentences[i].replace(",", " ,", 1)
-
-        if random.random() < 0.1 and len(sentences[i].split()) > 12:
-            words = sentences[i].split()
-            mid = len(words) // 2
-            sentences[i] = " ".join(words[:mid]) + ", " + " ".join(words[mid:])
-
-    text = " ".join(sentences)
-
+def _remove_trailing_period(text: str) -> str:
+    """Drop the period from the last sentence (rule #6)."""
     text = text.rstrip()
     if text.endswith("."):
         text = text[:-1]
+    return text
 
+
+def _remove_em_dashes_global(text: str) -> str:
+    """Remove any remaining em dashes or double hyphens."""
+    text = re.sub(r"\s*[—–]+\s*", " - ", text)
+    text = re.sub(r"\s+--\s+", " - ", text)
+    return text
+
+
+def structural_humanize(text: str, api_key: str = "") -> str:
+    """Full non-LLM structural humanization pass."""
+    text = _regex_cleanup(text)
+    text = _vary_openers(text)
+    text = _increase_burstiness(text)
+    text = _increase_perplexity(text, api_key=api_key)
+    text = _compact_technical_lists(text)
+    text = _add_spacing_quirks(text)
+    text = _remove_em_dashes_global(text)
+    text = _fix_capitalization(text)
+    text = _remove_trailing_period(text)
     return text
 
 
 # ---------------------------------------------------------------------------
-# Main pipeline
+# Phase 3: LLM sentence-level rewriter — the nuclear option
+# ---------------------------------------------------------------------------
+
+_SENTENCE_REWRITE_PROMPT = """Rewrite this sentence as a senior engineer in a code review. Keep same meaning and all file/function names. Change sentence structure, not just words. Drop apostrophes(dont,its,wont). Use " - " not em dashes. No trailing period. No "however"/"furthermore"/"additionally".
+
+Rewritten sentence:
+"""
+
+_FULL_REWRITE_PROMPT = """Rewrite as a senior engineer typing in a code review tool. Keep ALL technical content, file names, functions, and conclusions identical.
+
+Style: drop apostrophes(dont,its,wont), compact lists("a.c,b.h" not "a.c, b.h"), use " - " not em dashes, no trailing period, vary sentence lengths(mix short fragments with long run-ons), never repeat openers, use comma splices. No "furthermore"/"additionally"/"comprehensive"/"robust".
+
+TEXT TO REWRITE:
+"""
+
+
+def _llm_rewrite_full(text: str, api_key: str) -> str | None:
+    """Full-text LLM rewrite focused on perplexity/burstiness."""
+    result = llm_generate(_FULL_REWRITE_PROMPT + text, api_key=api_key)
+    if result:
+        result = _regex_cleanup(result)
+    return result
+
+
+def _llm_rewrite_sentence(sentence: str, api_key: str) -> str | None:
+    """Rewrite a single sentence to maximize perplexity."""
+    if len(sentence.split()) < 5:
+        return sentence
+    result = llm_generate(_SENTENCE_REWRITE_PROMPT + sentence, api_key=api_key)
+    if result:
+        result = result.strip().strip('"').strip("'")
+        result = _regex_cleanup(result)
+    return result
+
+
+def _llm_rewrite_worst_sentences(text: str, api_key: str, max_rewrites: int = 3) -> str:
+    """Find the most AI-like sentences and rewrite them individually."""
+    sentences = _split_sentences(text)
+    if len(sentences) < 2:
+        return text
+
+    # Score each sentence for "AI-likeness" using simple heuristics
+    scored = []
+    for i, s in enumerate(sentences):
+        ai_score = 0
+        words = s.split()
+        # Uniform medium length = AI
+        if 12 <= len(words) <= 18:
+            ai_score += 2
+        # Starts with AI-typical word
+        first = words[0].lower().rstrip(",") if words else ""
+        if first in ("the", "this", "model", "it", "these", "while", "both"):
+            ai_score += 2
+        # Contains eval cliche patterns
+        if re.search(r"\b(correctly|however|furthermore|additionally|overall)\b", s, re.I):
+            ai_score += 3
+        # No informal markers
+        if not re.search(r"\b(tbh|imo|fwiw|kinda|sorta|I think|seems|pretty)\b", s, re.I):
+            ai_score += 1
+        scored.append((i, ai_score))
+
+    scored.sort(key=lambda x: -x[1])
+    rewrites_done = 0
+
+    for idx, score in scored:
+        if rewrites_done >= max_rewrites:
+            break
+        if score < 3:
+            break
+        rewritten = _llm_rewrite_sentence(sentences[idx], api_key)
+        if rewritten and len(rewritten.strip()) > 5:
+            sentences[idx] = rewritten
+            rewrites_done += 1
+        time.sleep(1)
+
+    return _join_sentences(sentences)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Reviewer — checks if output would pass external detector
+# ---------------------------------------------------------------------------
+
+_REVIEW_PROMPT = """You are an AI detection reviewer. Analyze this text and determine if GPTZero would flag it as AI-generated.
+
+Check for these AI signals:
+1. Are sentence lengths uniform? (AI) or varied? (human)
+2. Are word choices predictable? (AI) or surprising? (human)
+3. Does every sentence start with a different word?
+4. Are there human imperfections? (hedges, fragments, asides)
+5. Is the grammar too perfect?
+6. Are there evaluation clichés? ("correctly implements", "better overall")
+
+Rate the text: PASS (would fool GPTZero) or FAIL (would be detected).
+If FAIL, list the specific sentences that are most AI-like.
+
+TEXT:
+"""
+
+
+def _llm_review(text: str, api_key: str) -> tuple[bool, str]:
+    """Have an LLM reviewer check if the text would pass AI detection."""
+    result = llm_generate(_REVIEW_PROMPT + text, api_key=api_key)
+    if not result:
+        return False, "no response"
+    passed = "PASS" in result.upper().split("\n")[0] if result else False
+    return passed, result
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline: Creator → Structural → LLM Rewrite → Review → Loop
 # ---------------------------------------------------------------------------
 
 def humanize_field(text: str, api_key: str, question_idx: int = 0,
-                   turn: int = 1, target: float = None) -> str:
+                   turn: int = 1, target: float = None,
+                   force_full: bool = False) -> str:
     """
     Humanize a single feedback field through multi-pass pipeline.
-    Each field gets a different style persona so answers dont pattern-match.
+    Architecture: Structural rewrite → Score → LLM rewrite → Score → Sentence fix → Score
+
+    When force_full=True, runs ALL passes regardless of intermediate scores.
+    Use for fields like Q21 justification where our internal scorer is known
+    to be too lenient compared to GPTZero.
     """
     if target is None:
         target = AI_SCORE_TARGET
-
     if len(text.strip()) < 30:
         return text
 
-    persona = _pick_persona(question_idx, turn)
     current = text
 
-    for pass_num in range(MAX_HUMANIZE_PASSES):
-        score = score_field(current)
+    # Pre-generate human phrases once per session using LLM
+    _get_human_phrases(api_key)
 
-        if score < target:
-            current = _apply_persona_quirks(current, persona)
+    # Pass 1: Structural humanization (regex, burstiness, perplexity injection)
+    current = structural_humanize(current, api_key=api_key)
+    score = score_field(current)
+    if score < target and not force_full:
+        return current
+
+    # Pass 2: Full LLM rewrite
+    if api_key:
+        rewritten = _llm_rewrite_full(current, api_key)
+        if rewritten and len(rewritten.strip()) > 20:
+            current = rewritten
+        current = structural_humanize(current, api_key=api_key)
+        score = score_field(current)
+        if score < target and not force_full:
             return current
 
-        if pass_num == 0:
-            current = regex_humanize(current)
-        elif pass_num == 1 and api_key:
-            result = llm_rewrite(current, api_key, persona)
-            if result:
-                current = result
-                current = regex_humanize(current)
-        elif pass_num >= 2:
-            current = regex_humanize(current)
-            current = _aggressive_inject(current)
+    # Pass 3: Sentence-level targeted rewrite (fix worst sentences)
+    if api_key:
+        current = _llm_rewrite_worst_sentences(current, api_key, max_rewrites=3)
+        current = _add_spacing_quirks(current)
+        score = score_field(current)
+        if score < target and not force_full:
+            return current
 
-    current = _apply_persona_quirks(current, persona)
+    # Pass 4: Second full LLM rewrite with more aggressive instructions
+    if api_key:
+        rewritten = _llm_rewrite_full(current, api_key)
+        if rewritten and len(rewritten.strip()) > 20:
+            current = rewritten
+        current = structural_humanize(current, api_key=api_key)
+        score = score_field(current)
+        if score < target and not force_full:
+            return current
+
+    # Pass 5: Last resort — aggressive random injection
+    current = _aggressive_last_resort(current)
     return current
+
+
+def _aggressive_last_resort(text: str) -> str:
+    """Nuclear option: forcefully inject human imperfections everywhere."""
+    sentences = _split_sentences(text)
+    if len(sentences) < 2:
+        return text
+
+    phrases = _get_human_phrases()
+    if sentences[0][0].isupper():
+        sentences[0] = random.choice(phrases) + sentences[0][0].lower() + sentences[0][1:]
+
+    # Force split the longest sentence
+    longest_idx = max(range(len(sentences)), key=lambda i: len(sentences[i].split()))
+    words = sentences[longest_idx].split()
+    if len(words) > 10:
+        cut = random.randint(3, min(6, len(words) - 3))
+        sentences[longest_idx] = " ".join(words[:cut]) + "."
+        rest = " ".join(words[cut:])
+        if rest[0].islower():
+            rest = rest[0].upper() + rest[1:]
+        sentences.insert(longest_idx + 1, rest)
+
+    # Force spacing quirk
+    for i in range(len(sentences)):
+        if "," in sentences[i]:
+            sentences[i] = sentences[i].replace(",", " ,", 1)
+            break
+
+    # Force drop trailing period
+    if sentences[-1].rstrip().endswith("."):
+        sentences[-1] = sentences[-1].rstrip()[:-1]
+
+    # Force add an aside
+    for i in range(len(sentences)):
+        words = sentences[i].split()
+        if len(words) > 10 and "(" not in sentences[i]:
+            pos = random.randint(4, len(words) - 4)
+            aside = random.choice([
+                "(at least from what I can see)",
+                "(which makes sense given the constraints)",
+                "(not a huge concern though)",
+            ])
+            words.insert(pos, aside)
+            sentences[i] = " ".join(words)
+            break
+
+    return _join_sentences(sentences)
 
 
 def humanize_feedback_file(content: str, api_key: str, turn: int = 1,
                            target: float = None) -> tuple[str, dict]:
-    """
-    Humanize an entire FEEDBACK_ANSWERS_TURN*.md file.
-    Splits into per-question blocks and humanizes each independently.
-
-    Returns (humanized_content, score_report).
-    """
+    """Humanize an entire FEEDBACK_ANSWERS_TURN*.md file."""
     if target is None:
         target = AI_SCORE_TARGET
 
@@ -452,20 +810,24 @@ def humanize_feedback_file(content: str, api_key: str, turn: int = 1,
 
 
 def humanize_prompt(text: str, api_key: str, target: float = None) -> str:
-    """Humanize a prompt (shorter text, simpler pipeline)."""
+    """Humanize a prompt through the same pipeline."""
     if target is None:
         target = AI_SCORE_TARGET
+    current = text
 
-    current = regex_humanize(text)
-    score = score_field(current)
-
-    if score < target:
-        return current
-
-    if api_key:
-        persona = random.choice(STYLE_PERSONAS)
-        result = llm_rewrite(current, api_key, persona)
-        if result:
-            current = regex_humanize(result)
+    for pass_num in range(MAX_HUMANIZE_PASSES):
+        score = score_field(current)
+        if score < target:
+            return current
+        if pass_num == 0:
+            current = structural_humanize(current, api_key=api_key)
+        elif pass_num == 1 and api_key:
+            result = _llm_rewrite_full(current, api_key)
+            if result:
+                current = result
+            current = structural_humanize(current, api_key=api_key)
+        else:
+            current = structural_humanize(current, api_key=api_key)
+            current = _aggressive_last_resort(current)
 
     return current

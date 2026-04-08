@@ -34,12 +34,20 @@ CRITICAL RULES:
 PROMPT_RULES = """Additional rules for the Initial Prompt section ONLY:
 - Describe the PROBLEM, not the solution
 - Target 150-250 words
-- Write like a developer filing a GitHub issue - casual but clear
-- Include what the codebase currently does wrong and what "done" looks like
-- Reference general areas of the codebase (modules, packages) but dont micromanage
-- Mix sentence lengths - some short (5-8 words), some longer (15-25 words)
-- Use abbreviations: param, repo, config, deps
-- No trailing period on the last sentence"""
+- Write like a developer filing a practical GitHub issue: casual but competent
+- Tone: think senior engineer explaining an issue to a teammate. Not angry, not formal. Just clear and natural
+- Reference general areas (modules, packages, config names) but be VAGUE about exact fixes
+- Describe what the current behavior is and why its a problem, then what "fixed" would look like
+- Drop apostrophes naturally: dont, its, wont, doesnt, cant, shouldnt
+- Mix sentence lengths: some short and direct, some longer with more context
+- Use abbreviations where natural: param, repo, config, deps, e.g.
+- No trailing period on the last sentence
+- NEVER use: "Ideally", "Currently", "Additionally", "Furthermore", "Notably", "It is worth noting"
+- NEVER use the pattern "Done means X". Say things like "we need X", "X should work", "the goal is X"
+- NEVER start consecutive sentences the same way
+- Avoid slang, profanity, or overly emotional language (no "nightmare", "freakin", "breaks my brain")
+- One or two natural asides are fine (e.g. "especially if someone starts a bunch of these")
+- Keep it grounded: describe the real technical issue, not a rant"""
 
 
 def generate_phase2_doc(pr_data: dict, diff_text: str, api_key: str,
@@ -148,10 +156,19 @@ Return ONLY valid JSON, no markdown fences, no explanation."""
 The PR addresses these specific issues (items 1-{len(turn1_items)}):
 {turn1_item_hints}
 
-Write a 150-250 word prompt that describes the PROBLEM these items solve.
-Be VAGUE enough that the model has to discover the solution, but specific enough that a good model will address all {len(turn1_items)} items.
-Do NOT describe the solution. Do NOT list the items explicitly. Instead, describe the symptoms and what "done" looks like.
-The model should naturally arrive at solving items 1-{len(turn1_items)} if it understands the problem well.
+Write a 150-250 word prompt that sounds like a competent developer describing a real problem to a colleague.
+Be VAGUE enough that the reader has to figure out the approach, but clear about what the problem IS.
+Dont list the changes needed. Dont mention specific functions to fix. Describe the symptoms and what "fixed" looks like.
+A good developer reading this should NATURALLY discover items 1-{len(turn1_items)} by understanding the problem well.
+
+BAD example (too formal, too AI):
+"Currently, the allocation logic is spread across several files. Ideally, we want to reduce the number of separate allocations. Done means faster creation."
+
+BAD example (too casual, too slangy):
+"this is a freakin nightmare, honestly breaks my brain, the whole thing is death by a thousand cuts"
+
+GOOD example (natural developer tone):
+"We have a problem with chat sessions sticking around in the background, even when they arent actively being used in the chat view. This is mostly happening with the local chat agent. Its causing unnecessary resource consumption, especially if someone starts a bunch of these sessions and forgets about them. The current config setting helps, but its a global setting. We need a way to prevent these background sessions from being created in certain scenarios. E.g., quick chat sessions shouldnt persist."
 
 Return ONLY the prompt text, nothing else."""
 

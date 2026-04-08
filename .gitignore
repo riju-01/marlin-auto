@@ -1,6 +1,17 @@
 tasks/
 data/
+debug-fca6df.log
+debug*.log
 __pycache__/
 *.pyc
 .env
 !.env.example
+
+# claude-hfi binary (proprietary; user places it here — do not commit)
+HFI/claude-hfi
+HFI/linux-amd64
+HFI/linux-arm64
+# Legacy optional path
+bin/claude-hfi
+bin/linux-amd64
+bin/linux-arm64

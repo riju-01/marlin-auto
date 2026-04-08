@@ -2,7 +2,6 @@
 
 import os
 import sys
-from pathlib import Path
 
 _INSIDE_WSL = sys.platform.startswith("linux")
 
@@ -47,6 +46,15 @@ else:
     FEEDBACK_TEMPLATE_PATH = os.path.join(
         WIN_WORKSPACE, "marlin-v2", "templates", "feedback_template.md"
     )
+
+# WSL path to this package (for locating optional bin/claude-hfi)
+if _INSIDE_WSL:
+    MARLIN_AUTO_DIR = os.path.dirname(os.path.abspath(__file__))
+else:
+    MARLIN_AUTO_DIR = f"{WORKSPACE}/marlin-auto"
+
+# Put your claude-hfi binary here (gitignored). Phase 3 copies it into each task repo.
+HFI_LOCAL_DIR = f"{MARLIN_AUTO_DIR}/HFI"
 
 WSL_DISTRO = os.environ.get("WSL_DISTRO", "Ubuntu")
 
