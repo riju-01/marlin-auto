@@ -12,8 +12,8 @@ the golden PR answer across 3 turns.
 
 import json
 
-from humanizer import humanize_prompt
-from llm_client import generate as llm_generate
+from pipeline.humanizer import humanize_prompt
+from core.llm_client import generate as llm_generate
 
 
 def generate_turn_prompt(turn_num: int, prev_diffs: str, prev_prompts: list[str],

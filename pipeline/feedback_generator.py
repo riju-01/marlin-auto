@@ -16,9 +16,9 @@ import re
 import time
 from pathlib import Path
 
-from config import TEAMMATE_PROMPT_PATH, EVALUATE_RULES_PATH, GEMINI_RATE_LIMIT_SLEEP
-from humanizer import humanize_field
-from llm_client import generate as llm_generate
+from core.config import TEAMMATE_PROMPT_PATH, EVALUATE_RULES_PATH, GEMINI_RATE_LIMIT_SLEEP
+from pipeline.humanizer import humanize_field
+from core.llm_client import generate as llm_generate
 
 
 def _strip_instruction_leakage(text: str) -> str:

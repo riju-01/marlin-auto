@@ -12,8 +12,8 @@ import os
 import time
 from pathlib import Path
 
-from config import HFI_POLL_INTERVAL, HFI_POLL_TIMEOUT, WSL_DISTRO
-from utils import wsl_exec, read_wsl_file
+from core.config import HFI_POLL_INTERVAL, HFI_POLL_TIMEOUT, WSL_DISTRO
+from core.utils import wsl_exec, read_wsl_file
 
 
 def find_session_dir() -> str | None:

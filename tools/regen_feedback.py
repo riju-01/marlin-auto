@@ -1,22 +1,23 @@
 """Quick standalone script to regenerate FEEDBACK_ANSWERS_TURN1.md from saved diffs.
-Usage: python regen_feedback.py <task_name> [--turn N]
+Usage: python -m tools.regen_feedback <task_name> [--turn N]
 
 Examples:
-  python regen_feedback.py numpy_numpy_31092
-  python regen_feedback.py numpy_numpy_31092 --turn 2
+  python -m tools.regen_feedback numpy_numpy_31092
+  python -m tools.regen_feedback numpy_numpy_31092 --turn 2
 """
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO_ROOT)
 
 from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+load_dotenv(os.path.join(_REPO_ROOT, ".env"))
 
-from feedback_generator import generate_all_feedback, format_feedback_md
-from llm_client import detect_provider
+from pipeline.feedback_generator import generate_all_feedback, format_feedback_md
+from core.llm_client import detect_provider
 
-TASKS_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks")
+TASKS_ROOT = os.path.join(_REPO_ROOT, "tasks")
 
 def main():
     if len(sys.argv) < 2:

@@ -33,8 +33,8 @@ PROVIDERS = {
 
 
 def _load_env():
-    """Load .env file from the marlin-auto directory."""
-    env_path = Path(__file__).parent / ".env"
+    """Load .env file from the marlin-auto root directory."""
+    env_path = Path(__file__).parent.parent / ".env"
     if not env_path.exists():
         return
     for line in env_path.read_text(encoding="utf-8").splitlines():

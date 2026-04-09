@@ -14,8 +14,8 @@ Also generates standalone turn1_prompt.txt for copy-paste into HFI.
 
 import json
 
-from humanizer import humanize_prompt
-from llm_client import generate as llm_generate
+from pipeline.humanizer import humanize_prompt
+from core.llm_client import generate as llm_generate
 
 
 PHASE2_SYSTEM = """You are analyzing a GitHub PR for a coding model evaluation task.

@@ -23,9 +23,9 @@ import random
 import re
 import time
 
-from ai_scorer import score_field, full_validation, AI_VOCABULARY
-from config import AI_SCORE_TARGET, MAX_HUMANIZE_PASSES
-from llm_client import generate as llm_generate
+from core.ai_scorer import score_field, full_validation, AI_VOCABULARY
+from core.config import AI_SCORE_TARGET, MAX_HUMANIZE_PASSES
+from core.llm_client import generate as llm_generate
 
 # ---------------------------------------------------------------------------
 # Regex transform tables

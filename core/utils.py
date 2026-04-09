@@ -8,7 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from config import WSL_DISTRO, DATA_DIR
+from core.config import WSL_DISTRO, DATA_DIR
 
 # Detect if we're already running inside WSL/Linux
 _INSIDE_WSL = sys.platform.startswith("linux")

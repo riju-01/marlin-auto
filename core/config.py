@@ -9,10 +9,12 @@ _INSIDE_WSL = sys.platform.startswith("linux")
 # Paths  (auto-detect Windows vs WSL)
 # ---------------------------------------------------------------------------
 
+# _repo_root is the marlin-auto/ directory (parent of core/)
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 if _INSIDE_WSL:
-    _script_dir = os.path.dirname(os.path.abspath(__file__))
-    WORKSPACE = os.path.dirname(_script_dir)           # parent of marlin-auto
-    DATA_DIR = os.path.join(_script_dir, "tasks")
+    WORKSPACE = os.path.dirname(_repo_root)            # parent of marlin-auto
+    DATA_DIR = os.path.join(_repo_root, "tasks")
     MARLIN_V2 = os.path.join(WORKSPACE, "marlin-v2")
     SCRIPTS_DIR = os.path.join(MARLIN_V2, "scripts")
     TEAMMATE_PROMPT_PATH = os.path.join(
@@ -49,7 +51,7 @@ else:
 
 # WSL path to this package (for locating optional bin/claude-hfi)
 if _INSIDE_WSL:
-    MARLIN_AUTO_DIR = os.path.dirname(os.path.abspath(__file__))
+    MARLIN_AUTO_DIR = _repo_root
 else:
     MARLIN_AUTO_DIR = f"{WORKSPACE}/marlin-auto"
 

@@ -32,26 +32,26 @@ from rich import box as rbox
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import (
+from core.config import (
     MARLIN_V2, SCRIPTS_DIR, WORKSPACE, DATA_DIR, MARLIN_AUTO_DIR, HFI_LOCAL_DIR,
     INTERFACE_CODE, AI_SCORE_TARGET,
 )
-from utils import (
+from core.utils import (
     wsl_exec, wsl_exec_script, read_wsl_file,
     write_task_file, read_task_file, ensure_task_dir,
 )
-from llm_client import detect_provider, provider_info
-from pr_fetcher import rank_prs, fetch_pr_diff, parse_pr_url, fetch_and_rank_pr
-from prompt_generator import generate_phase2_doc, format_phase2_md, generate_turn1_prompt
-from turn_prompt_generator import generate_turn_prompt
-from feedback_generator import generate_all_feedback, format_feedback_md, regenerate_single_field
-from ai_scorer import score_field, full_validation
-from hfi_watcher import (
+from core.llm_client import detect_provider, provider_info
+from integrations.pr_fetcher import rank_prs, fetch_pr_diff, parse_pr_url, fetch_and_rank_pr
+from pipeline.prompt_generator import generate_phase2_doc, format_phase2_md, generate_turn1_prompt
+from pipeline.turn_prompt_generator import generate_turn_prompt
+from pipeline.feedback_generator import generate_all_feedback, format_feedback_md, regenerate_single_field
+from core.ai_scorer import score_field, full_validation
+from integrations.hfi_watcher import (
     find_session_dir, wait_for_turn, extract_diffs_from_worktrees,
     get_session_file_path, extract_trace, get_hfi_launch_commands,
     get_between_turn_steps,
 )
-from tui import (
+from ui.tui import (
     console, print_header, print_phase, print_status, print_success,
     print_warning, print_error, get_pr_urls, display_pr_rankings,
     display_prompt, get_edited_prompt, display_setup_progress,

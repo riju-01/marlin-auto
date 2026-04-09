@@ -3,6 +3,7 @@ data/
 debug-fca6df.log
 debug*.log
 __pycache__/
+**/__pycache__/
 *.pyc
 .env
 !.env.example

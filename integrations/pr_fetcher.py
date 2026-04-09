@@ -10,7 +10,7 @@ import re
 
 import requests
 
-from config import PR_DIFF_MIN_LINES, PR_DIFF_MAX_LINES, PR_DIFF_SWEET_SPOT, SUPPORTED_LANGUAGES
+from core.config import PR_DIFF_MIN_LINES, PR_DIFF_MAX_LINES, PR_DIFF_SWEET_SPOT, SUPPORTED_LANGUAGES
 
 
 def _github_headers() -> dict:
