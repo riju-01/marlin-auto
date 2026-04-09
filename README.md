@@ -178,6 +178,19 @@ python3 marlin_auto.py --pr https://github.com/owner/repo/pull/123 --skip-rankin
 python3 marlin_auto.py --skip-setup
 ```
 
+### Resume a task
+
+If the automation crashes or you need to come back later, resume from a
+specific turn:
+
+```bash
+python3 marlin_auto.py --resume apache_kafka_10438 --turn 2
+```
+
+This skips Phases 1-3 and jumps straight into the turn loop. It reads
+`task_state.env`, `checklist.json`, and existing diffs/prompts from the
+task directory.
+
 ### Combine options
 
 ```bash
@@ -239,6 +252,9 @@ For each turn:
 6. **Copy-paste** - answers are displayed with per-field AI scores and saved
    to `FEEDBACK_ANSWERS_TURNx.md`. You paste them into the HFI feedback form.
 
+7. **Per-field regeneration** - if a specific answer is bad, press `n` to
+   regenerate just that one field instead of all 21. See below.
+
 ### Between Turns
 
 The automation shows a step-by-step checklist:
@@ -274,20 +290,59 @@ survey, and submit on Snorkel.
 
 ---
 
+## Feedback Review Menu
+
+After feedback is generated, you see this menu:
+
+```
+[C]ontinue to next step  [V]iew full file  [R]egenerate all  [N]umber to regen one field
+```
+
+| Key | Action |
+|-----|--------|
+| `c` | Accept answers and move to the next step |
+| `v` | Print the full markdown file to the terminal |
+| `r` | Regenerate **all** 21 fields from scratch |
+| `n` | Regenerate a **single** field by number |
+
+### Per-field regeneration
+
+Press `n` and you get a prompt:
+
+```
+Field numbers: 1=Senior engineer expectations, 2=Model A solution quality,
+3=Model A agency, 4=Model A communication, 5=Model B solution quality,
+6=Model B agency, 7=Model B communication, 21=Overall justification
+
+Enter field number [1-7 or 21]:
+```
+
+Type a number (e.g. `5`) and the system regenerates only that field,
+rewrites `FEEDBACK_ANSWERS_TURNx.md`, and re-displays all answers.
+You can repeat this as many times as needed before pressing `c`.
+
+---
+
 ## Humanization Pipeline
 
 Every generated answer goes through:
 
-1. **Regex transforms** - strips 40+ AI vocabulary words ("leverage" → "use",
-   "robust" → "solid"), removes filler phrases, adds contractions, fixes
-   em dashes
-2. **AI score check** (9 weighted signals, target < 30%)
-3. **LLM rewrite** with a randomized style persona (5 personas: terse
-   engineer, verbose reviewer, casual dev, analytical lead, blunt senior)
-4. **Aggressive injection** as last resort (comma quirks, sentence splits)
+1. **Regex cleanup** - strips 40+ AI vocabulary words ("leverage" → "use",
+   "robust" → "solid"), removes filler phrases, drops apostrophes in
+   contractions (dont, its, wont), fixes em dashes, removes backticks
+2. **Structural pass** - varies sentence openers, merges short sentences for
+   length variation, compacts technical lists
+3. **AI score check** (9 weighted signals, target < 30%)
+4. **LLM rewrite** - full-text rewrite preserving all technical content but
+   varying sentence structure and word choice
+5. **Sentence-level fixes** - targets the most "AI-like" sentences for
+   individual rewrites
+6. **Final cleanup** - strips any remaining backticks, ensures no trailing
+   period
 
-Each of the 21 answers gets a **different persona** so cross-answer patterns
-are broken.
+Each of the 7 textarea answers gets a **different voice modifier** so
+cross-answer patterns are broken. All backticks and markdown formatting
+are stripped since HFI text fields are plain text.
 
 ---
 
@@ -345,7 +400,8 @@ and run `chmod +x HFI/claude-hfi`, or use a fallback path from the README
 search list (e.g. `~/marlin-tools/claude-hfi`).
 
 **AI score too high** - The system retries up to 6 passes. If scores are
-still above 30%, press R when shown answers to regenerate.
+still above 30%, press `r` to regenerate all answers, or `n` to regenerate
+a specific field by number.
 
 **tmux "sessions should be nested"** - You tried to start tmux inside tmux.
 Run `unset TMUX` first, or use `Ctrl+B :switch-client`.

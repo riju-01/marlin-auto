@@ -44,7 +44,7 @@ from llm_client import detect_provider, provider_info
 from pr_fetcher import rank_prs, fetch_pr_diff, parse_pr_url, fetch_and_rank_pr
 from prompt_generator import generate_phase2_doc, format_phase2_md, generate_turn1_prompt
 from turn_prompt_generator import generate_turn_prompt
-from feedback_generator import generate_all_feedback, format_feedback_md
+from feedback_generator import generate_all_feedback, format_feedback_md, regenerate_single_field
 from ai_scorer import score_field, full_validation
 from hfi_watcher import (
     find_session_dir, wait_for_turn, extract_diffs_from_worktrees,
@@ -56,9 +56,36 @@ from tui import (
     print_warning, print_error, get_pr_urls, display_pr_rankings,
     display_prompt, get_edited_prompt, display_setup_progress,
     display_hfi_commands, display_waiting_for_turn, display_feedback_answers,
-    display_feedback_file_path, ask_continue_or_view, wait_for_user,
+    display_feedback_file_path, ask_continue_or_view, ask_field_number, wait_for_user,
     display_between_turns, display_completion,
 )
+
+
+_TEXTAREA_KEYS = [
+    "expected_model_response",
+    "model_a_solution_quality", "model_a_agency", "model_a_communication",
+    "model_b_solution_quality", "model_b_agency", "model_b_communication",
+]
+
+
+def _compute_field_scores(answers: dict) -> dict:
+    """Score each textarea field for AI detection, matching the keys display_feedback_answers expects."""
+    scores = {}
+    all_text_parts = []
+    for i, key in enumerate(_TEXTAREA_KEYS):
+        text = answers.get(key, "")
+        s = score_field(text) if len(text.strip()) > 30 else 0.0
+        scores[f"section_{i}"] = s
+        if text.strip():
+            all_text_parts.append(text)
+
+    justification = answers.get("overall_preference_justification", "")
+    if len(justification.strip()) > 30:
+        all_text_parts.append(justification)
+
+    combined = "\n\n".join(all_text_parts)
+    scores["overall"] = score_field(combined) if len(combined.strip()) > 50 else 0.0
+    return scores
 
 
 def _display_checklist_progress(checklist: list[dict], completed: list[int], turn_num: int):
@@ -381,6 +408,10 @@ def main():
                         help="Skip PR ranking (use first --pr directly without scoring)")
     parser.add_argument("--pr", help="Single PR URL (skips interactive selection)")
     parser.add_argument("--repo-dir", help="WSL path to repo dir (skips setup)")
+    parser.add_argument("--resume", metavar="TASK_NAME",
+                        help="Resume an existing task (e.g. apache_kafka_10438)")
+    parser.add_argument("--turn", type=int, choices=[1, 2, 3],
+                        help="Start from this turn number (use with --resume)")
     args = parser.parse_args()
 
     if args.gemini:
@@ -406,178 +437,239 @@ def main():
     console.print()
 
     # ------------------------------------------------------------------
-    # PHASE 1: PR Selection
+    # RESUME: skip Phase 1-3 if resuming an existing task
     # ------------------------------------------------------------------
-    print_phase(1, "PR SELECTION")
+    if args.resume:
+        task_name = args.resume
+        state_raw = read_task_file(task_name, "task_state.env")
+        if not state_raw:
+            print_error(f"No task_state.env found for task '{task_name}'")
+            return
 
-    skip_ranking = args.skip_ranking
-    pr_url_arg = args.pr
+        state = {}
+        for line in state_raw.strip().split("\n"):
+            if "=" in line:
+                k, v = line.split("=", 1)
+                state[k.strip()] = v.strip()
 
-    if not pr_url_arg:
-        from rich.prompt import Prompt as _Prompt
-        choice = _Prompt.ask(
-            "  [bold][P]aste PRs to rank  or  [S]kip with a single PR URL[/bold]",
-            choices=["p", "s"],
-            default="p",
-        )
-        if choice.lower() == "s":
-            pr_url_arg = _Prompt.ask("  [bold]Paste PR URL[/bold]")
-            skip_ranking = True
+        pr_url = state.get("PR_URL", "")
+        if not pr_url:
+            print_error("task_state.env missing PR_URL")
+            return
 
-    if pr_url_arg and skip_ranking:
-        print_status(f"Using PR directly: {pr_url_arg}")
-        pr_data = fetch_and_rank_pr(pr_url_arg)
+        print_status(f"Resuming task: {task_name}")
+        print_status(f"PR: {pr_url}")
+
+        pr_data = fetch_and_rank_pr(pr_url)
         if not pr_data:
-            print_error(f"Failed to fetch PR: {pr_url_arg}")
-            return
-        print_success(f"PR: {pr_data['owner']}/{pr_data['repo']}#{pr_data['number']}")
-        print_success(f"Title: {pr_data['meta']['title'][:70]}")
-    else:
-        if pr_url_arg:
-            urls = [pr_url_arg]
-        else:
-            urls = get_pr_urls()
-
-        if not urls:
-            print_error("No PR URLs provided. Exiting.")
+            print_error(f"Failed to fetch PR data from {pr_url}")
             return
 
-        ranked = rank_prs(urls, status_callback=lambda m: print_status(m))
+        repo_dir = args.repo_dir or state.get("REPO_DIR", "")
+        prompt_text = read_task_file(task_name, "turn1_prompt.txt")
+        if not prompt_text:
+            phase2_raw = read_task_file(task_name, "phase2.md")
+            prompt_text = phase2_raw if phase2_raw else "(no prompt found)"
 
-        if not ranked:
-            print_error("Failed to fetch any PRs. Check your URLs and network.")
-            return
-
-        selected_idx = display_pr_rankings(ranked)
-        if selected_idx is None:
-            print_error("No PR selected. Exiting.")
-            return
-
-        pr_data = ranked[selected_idx]
-
-    task_name = pr_data["task_name"]
-    ensure_task_dir(task_name)
-
-    print_success(f"Selected: {pr_data['owner']}/{pr_data['repo']}#{pr_data['number']}")
-
-    task_state = (
-        f"PR_URL={pr_data['url']}\n"
-        f"OWNER={pr_data['owner']}\n"
-        f"REPO={pr_data['repo']}\n"
-        f"PR_NUMBER={pr_data['number']}\n"
-        f"TASK_NAME={task_name}\n"
-        f"BASE_COMMIT={pr_data['meta']['base_sha']}\n"
-    )
-    write_task_file(task_name, "task_state.env", task_state)
-
-    # ------------------------------------------------------------------
-    # PHASE 2: Prompt Preparation (full phase2.md)
-    # ------------------------------------------------------------------
-    print_phase(2, "PROMPT PREPARATION")
-
-    print_status("Fetching PR diff...")
-    diff_text = fetch_pr_diff(pr_data["owner"], pr_data["repo"], pr_data["number"])
-    write_task_file(task_name, "pr_diff.txt", diff_text)
-
-    prompt_text = None
-    phase2_doc = None
-
-    while True:
-        phase2_doc = generate_phase2_doc(
-            pr_data, diff_text, api_key,
-            status_callback=lambda m: print_status(m),
-        )
-
-        if not phase2_doc:
-            print_error("Failed to generate Phase 2 analysis. Retrying...")
-            time.sleep(3)
-            continue
-
-        prompt_text = phase2_doc["prompt"]
-
-        # Show the full analysis
+        diff_text = read_task_file(task_name, "pr_diff.txt")
+        _resume_start_turn = args.turn or 1
+        print_success(f"Resuming from Turn {_resume_start_turn}")
         console.print()
-        if phase2_doc.get("repo_def"):
-            console.print(Panel(
-                phase2_doc["repo_def"],
-                title="[bold]Repo Definition[/bold]",
-                box=rbox.ROUNDED, padding=(0, 1),
-            ))
-        if phase2_doc.get("pr_def"):
-            console.print(Panel(
-                phase2_doc["pr_def"],
-                title="[bold]PR Definition[/bold]",
-                box=rbox.ROUNDED, padding=(0, 1),
-            ))
-        if phase2_doc.get("edge_cases"):
-            console.print(Panel(
-                phase2_doc["edge_cases"],
-                title="[bold]Edge Cases[/bold]",
-                box=rbox.ROUNDED, padding=(0, 1),
-            ))
-        if phase2_doc.get("acceptance_criteria"):
-            console.print(Panel(
-                phase2_doc["acceptance_criteria"],
-                title="[bold]Acceptance Criteria[/bold]",
-                box=rbox.ROUNDED, padding=(0, 1),
-            ))
+
+        # Load checklist
+        checklist_raw = read_task_file(task_name, "checklist.json")
+        checklist = []
+        if checklist_raw:
+            try:
+                checklist = json.loads(checklist_raw)
+            except json.JSONDecodeError:
+                pass
+
+        # Load completed items from previous turns
+        ci_raw = read_task_file(task_name, "completed_items.json")
+        _resume_completed: list[int] = []
+        if ci_raw:
+            try:
+                _resume_completed = json.loads(ci_raw)
+            except json.JSONDecodeError:
+                pass
+
+        # Skip Phase 1-3 entirely, jump to turn loop below
+    else:
+        # ----------------------------------------------------------
+        # PHASE 1: PR Selection
+        # ----------------------------------------------------------
+        print_phase(1, "PR SELECTION")
+
+        skip_ranking = args.skip_ranking
+        pr_url_arg = args.pr
+
+        if not pr_url_arg:
+            from rich.prompt import Prompt as _Prompt
+            choice = _Prompt.ask(
+                "  [bold][P]aste PRs to rank  or  [S]kip with a single PR URL[/bold]",
+                choices=["p", "s"],
+                default="p",
+            )
+            if choice.lower() == "s":
+                pr_url_arg = _Prompt.ask("  [bold]Paste PR URL[/bold]")
+                skip_ranking = True
+
+        if pr_url_arg and skip_ranking:
+            print_status(f"Using PR directly: {pr_url_arg}")
+            pr_data = fetch_and_rank_pr(pr_url_arg)
+            if not pr_data:
+                print_error(f"Failed to fetch PR: {pr_url_arg}")
+                return
+            print_success(f"PR: {pr_data['owner']}/{pr_data['repo']}#{pr_data['number']}")
+            print_success(f"Title: {pr_data['meta']['title'][:70]}")
+        else:
+            if pr_url_arg:
+                urls = [pr_url_arg]
+            else:
+                urls = get_pr_urls()
+
+            if not urls:
+                print_error("No PR URLs provided. Exiting.")
+                return
+
+            ranked = rank_prs(urls, status_callback=lambda m: print_status(m))
+
+            if not ranked:
+                print_error("Failed to fetch any PRs. Check your URLs and network.")
+                return
+
+            selected_idx = display_pr_rankings(ranked)
+            if selected_idx is None:
+                print_error("No PR selected. Exiting.")
+                return
+
+            pr_data = ranked[selected_idx]
+
+        task_name = pr_data["task_name"]
+        ensure_task_dir(task_name)
+
+        print_success(f"Selected: {pr_data['owner']}/{pr_data['repo']}#{pr_data['number']}")
+
+        task_state = (
+            f"PR_URL={pr_data['url']}\n"
+            f"OWNER={pr_data['owner']}\n"
+            f"REPO={pr_data['repo']}\n"
+            f"PR_NUMBER={pr_data['number']}\n"
+            f"TASK_NAME={task_name}\n"
+            f"BASE_COMMIT={pr_data['meta']['base_sha']}\n"
+        )
+        write_task_file(task_name, "task_state.env", task_state)
+
+        # ----------------------------------------------------------
+        # PHASE 2: Prompt Preparation (full phase2.md)
+        # ----------------------------------------------------------
+        print_phase(2, "PROMPT PREPARATION")
+
+        print_status("Fetching PR diff...")
+        diff_text = fetch_pr_diff(pr_data["owner"], pr_data["repo"], pr_data["number"])
+        write_task_file(task_name, "pr_diff.txt", diff_text)
+
+        prompt_text = None
+        phase2_doc = None
+
+        while True:
+            phase2_doc = generate_phase2_doc(
+                pr_data, diff_text, api_key,
+                status_callback=lambda m: print_status(m),
+            )
+
+            if not phase2_doc:
+                print_error("Failed to generate Phase 2 analysis. Retrying...")
+                time.sleep(3)
+                continue
+
+            prompt_text = phase2_doc["prompt"]
+
+            console.print()
+            if phase2_doc.get("repo_def"):
+                console.print(Panel(
+                    phase2_doc["repo_def"],
+                    title="[bold]Repo Definition[/bold]",
+                    box=rbox.ROUNDED, padding=(0, 1),
+                ))
+            if phase2_doc.get("pr_def"):
+                console.print(Panel(
+                    phase2_doc["pr_def"],
+                    title="[bold]PR Definition[/bold]",
+                    box=rbox.ROUNDED, padding=(0, 1),
+                ))
+            if phase2_doc.get("edge_cases"):
+                console.print(Panel(
+                    phase2_doc["edge_cases"],
+                    title="[bold]Edge Cases[/bold]",
+                    box=rbox.ROUNDED, padding=(0, 1),
+                ))
+            if phase2_doc.get("acceptance_criteria"):
+                console.print(Panel(
+                    phase2_doc["acceptance_criteria"],
+                    title="[bold]Acceptance Criteria[/bold]",
+                    box=rbox.ROUNDED, padding=(0, 1),
+                ))
+            checklist = phase2_doc.get("checklist", [])
+            if checklist:
+                cl_lines = []
+                for item in checklist:
+                    files = ", ".join(item.get("files", []))
+                    cl_lines.append(
+                        f"[bold]{item['id']}.[/bold] [{item.get('complexity', '?')}] "
+                        f"{item['description']}\n   [dim]{files}[/dim]"
+                    )
+                console.print(Panel(
+                    "\n".join(cl_lines),
+                    title=f"[bold]PR Change Checklist ({len(checklist)} items)[/bold]",
+                    subtitle="[dim]Turn 1 covers 1-5 · Turns 2-3 adapt based on model progress[/dim]",
+                    box=rbox.ROUNDED, padding=(0, 1),
+                ))
+
+            validation = full_validation(prompt_text)
+            action = display_prompt(prompt_text, validation["overall"], turn=1)
+
+            if action == "accept":
+                break
+            elif action == "edit":
+                prompt_text = get_edited_prompt()
+                phase2_doc["prompt"] = prompt_text
+                break
+
+        phase2_md = format_phase2_md(pr_data, phase2_doc)
+        write_task_file(task_name, "phase2.md", phase2_md)
+        print_success("phase2.md saved (repo def, PR def, edge cases, acceptance criteria)")
+
         checklist = phase2_doc.get("checklist", [])
         if checklist:
-            cl_lines = []
-            for item in checklist:
-                files = ", ".join(item.get("files", []))
-                cl_lines.append(
-                    f"[bold]{item['id']}.[/bold] [{item.get('complexity', '?')}] "
-                    f"{item['description']}\n   [dim]{files}[/dim]"
-                )
-            console.print(Panel(
-                "\n".join(cl_lines),
-                title=f"[bold]PR Change Checklist ({len(checklist)} items)[/bold]",
-                subtitle="[dim]Turn 1 covers 1-5 · Turns 2-3 adapt based on model progress[/dim]",
-                box=rbox.ROUNDED, padding=(0, 1),
-            ))
+            write_task_file(task_name, "checklist.json", json.dumps(checklist, indent=2))
+            print_success(f"Checklist saved ({len(checklist)} items)")
 
-        validation = full_validation(prompt_text)
-        action = display_prompt(prompt_text, validation["overall"], turn=1)
+        write_task_file(task_name, "turn1_prompt.txt", prompt_text)
+        print_success(f"Turn 1 prompt saved ({len(prompt_text.split())} words)")
 
-        if action == "accept":
-            break
-        elif action == "edit":
-            prompt_text = get_edited_prompt()
-            phase2_doc["prompt"] = prompt_text
-            break
+        # ----------------------------------------------------------
+        # PHASE 3: Environment Setup
+        # ----------------------------------------------------------
+        repo_dir = args.repo_dir or ""
 
-    # Save phase2.md and checklist
-    phase2_md = format_phase2_md(pr_data, phase2_doc)
-    write_task_file(task_name, "phase2.md", phase2_md)
-    print_success("phase2.md saved (repo def, PR def, edge cases, acceptance criteria)")
+        if not args.skip_setup and not repo_dir:
+            repo_dir = _run_setup(task_name, pr_data, task_state)
+        elif args.skip_setup:
+            print_status("Skipping setup (--skip-setup)")
+        elif repo_dir:
+            print_status(f"Using provided repo dir: {repo_dir}")
 
-    checklist = phase2_doc.get("checklist", [])
-    if checklist:
-        write_task_file(task_name, "checklist.json", json.dumps(checklist, indent=2))
-        print_success(f"Checklist saved ({len(checklist)} items)")
-
-    write_task_file(task_name, "turn1_prompt.txt", prompt_text)
-    print_success(f"Turn 1 prompt saved ({len(prompt_text.split())} words)")
-
-    # ------------------------------------------------------------------
-    # PHASE 3: Environment Setup
-    # ------------------------------------------------------------------
-    repo_dir = args.repo_dir or ""
-
-    if not args.skip_setup and not repo_dir:
-        repo_dir = _run_setup(task_name, pr_data, task_state)
-    elif args.skip_setup:
-        print_status("Skipping setup (--skip-setup)")
-    elif repo_dir:
-        print_status(f"Using provided repo dir: {repo_dir}")
+        _resume_start_turn = 1
+        _resume_completed = []
 
     # ------------------------------------------------------------------
     # TURN LOOP (1-3)
     # ------------------------------------------------------------------
     prompts = [prompt_text]
     acceptance_criteria = read_task_file(task_name, "phase2.md") or prompt_text
-    completed_items: list[int] = []
+    completed_items: list[int] = list(_resume_completed)
 
     # Get HEAD commit for survey answers
     head_commit = ""
@@ -585,7 +677,7 @@ def main():
         _, hc_out, _ = wsl_exec(f"cd '{repo_dir}' && git rev-parse HEAD 2>/dev/null")
         head_commit = hc_out.strip()
 
-    for turn_num in range(1, 4):
+    for turn_num in range(_resume_start_turn, 4):
         print_phase(4 + turn_num - 1, f"TURN {turn_num}")
 
         if turn_num == 1:
@@ -750,6 +842,9 @@ bash scripts/marlin_review.sh 2>&1
             task_name, f"FEEDBACK_ANSWERS_TURN{turn_num}.md", feedback_md
         )
 
+        # Score each field for AI detection display
+        field_scores = _compute_field_scores(answers)
+
         # Display
         display_feedback_answers(answers, field_scores, turn_num)
         display_feedback_file_path(feedback_path)
@@ -758,10 +853,10 @@ bash scripts/marlin_review.sh 2>&1
             action = ask_continue_or_view()
             if action == "view":
                 console.print()
-                console.print(humanized_md)
+                console.print(feedback_md)
                 console.print()
             elif action == "regenerate":
-                print_status("Regenerating...")
+                print_status("Regenerating all fields...")
                 answers = generate_all_feedback(
                     turn=turn_num, diffs_a=diffs_a, diffs_b=diffs_b,
                     traces_a=traces_a, traces_b=traces_b,
@@ -773,7 +868,26 @@ bash scripts/marlin_review.sh 2>&1
                 feedback_path = write_task_file(
                     task_name, f"FEEDBACK_ANSWERS_TURN{turn_num}.md", feedback_md
                 )
-                display_feedback_answers(answers, {}, turn_num)
+                field_scores = _compute_field_scores(answers)
+                display_feedback_answers(answers, field_scores, turn_num)
+                display_feedback_file_path(feedback_path)
+            elif action == "regen_field":
+                field_num = ask_field_number()
+                print_status(f"Regenerating field {field_num}...")
+                field_key, new_text = regenerate_single_field(
+                    field_num=field_num, turn=turn_num,
+                    diffs_a=diffs_a, diffs_b=diffs_b,
+                    traces_a=traces_a, traces_b=traces_b,
+                    acceptance_criteria=acceptance_criteria,
+                    api_key=api_key,
+                )
+                answers[field_key] = new_text
+                feedback_md = format_feedback_md(answers, turn_num)
+                feedback_path = write_task_file(
+                    task_name, f"FEEDBACK_ANSWERS_TURN{turn_num}.md", feedback_md
+                )
+                field_scores = _compute_field_scores(answers)
+                display_feedback_answers(answers, field_scores, turn_num)
                 display_feedback_file_path(feedback_path)
             else:
                 break

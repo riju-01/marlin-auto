@@ -388,11 +388,27 @@ def display_feedback_file_path(path: str):
 def ask_continue_or_view() -> str:
     """After showing feedback, ask what to do next."""
     action = Prompt.ask(
-        "  [bold][C]ontinue to next step  [V]iew full file  [R]egenerate[/bold]",
-        choices=["c", "v", "r"],
+        "  [bold][C]ontinue to next step  [V]iew full file  [R]egenerate all  [N]umber to regen one field[/bold]",
+        choices=["c", "v", "r", "n"],
         default="c",
     )
-    return {"c": "continue", "v": "view", "r": "regenerate"}[action.lower()]
+    return {"c": "continue", "v": "view", "r": "regenerate", "n": "regen_field"}[action.lower()]
+
+
+def ask_field_number() -> int:
+    """Ask which field number to regenerate (1-7 or 21)."""
+    console.print("  [dim]Field numbers: 1=Senior engineer expectations, 2=Model A solution quality,[/dim]")
+    console.print("  [dim]3=Model A agency, 4=Model A communication, 5=Model B solution quality,[/dim]")
+    console.print("  [dim]6=Model B agency, 7=Model B communication, 21=Overall justification[/dim]")
+    while True:
+        val = Prompt.ask("  Enter field number [1-7 or 21]")
+        try:
+            num = int(val.strip())
+            if num in (1, 2, 3, 4, 5, 6, 7, 21):
+                return num
+        except ValueError:
+            pass
+        console.print("  [red]Invalid. Enter a number 1-7 or 21.[/red]")
 
 
 def wait_for_user(msg: str = "Press Enter when ready..."):

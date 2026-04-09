@@ -32,22 +32,34 @@ CRITICAL RULES:
 
 
 PROMPT_RULES = """Additional rules for the Initial Prompt section ONLY:
-- Describe the PROBLEM, not the solution
-- Target 150-250 words
-- Write like a developer filing a practical GitHub issue: casual but competent
-- Tone: think senior engineer explaining an issue to a teammate. Not angry, not formal. Just clear and natural
-- Reference general areas (modules, packages, config names) but be VAGUE about exact fixes
-- Describe what the current behavior is and why its a problem, then what "fixed" would look like
+
+STRUCTURE (rubric requires this):
+- Start with a 1-2 sentence summary of what the task is before any detail
+- Organize into short labeled sections. Use bold labels like **Where to work:** or **What to remove:** - NOT formal "Objective / Scope / Deliverables" headers
+- Use bullet points to enumerate specific targets (APIs, methods, classes, paths)
+- End with a **Done when:** section: 2-3 bullets that are testable completion criteria
+- Keep total length 150-300 words. Structure doesnt mean verbose
+
+TONE:
+- Write like a developer posting in a team channel: casual but organized
+- Tone: senior engineer who typed this in 3 minutes. Not angry, not formal. Just clear
 - Drop apostrophes naturally: dont, its, wont, doesnt, cant, shouldnt
-- Mix sentence lengths: some short and direct, some longer with more context
+- Mix sentence lengths in the prose parts. Bullets can be terse
 - Use abbreviations where natural: param, repo, config, deps, e.g.
-- No trailing period on the last sentence
-- NEVER use: "Ideally", "Currently", "Additionally", "Furthermore", "Notably", "It is worth noting"
-- NEVER use the pattern "Done means X". Say things like "we need X", "X should work", "the goal is X"
-- NEVER start consecutive sentences the same way
-- Avoid slang, profanity, or overly emotional language (no "nightmare", "freakin", "breaks my brain")
-- One or two natural asides are fine (e.g. "especially if someone starts a bunch of these")
-- Keep it grounded: describe the real technical issue, not a rant"""
+- One or two natural asides are fine (e.g. "they had warnings")
+
+CONTENT:
+- Describe the PROBLEM, not the solution
+- Reference general areas (modules, packages, config names) but be VAGUE about exact fixes
+- The opening summary says what the task is. The sections say where/what/done-when
+- No trailing period on the last bullet or sentence
+
+NEVER:
+- NEVER use: "Ideally", "Currently", "Additionally", "Furthermore", "Notably"
+- NEVER use "Done means X" or "Objective:" or "Success Criteria:" as headers
+- NEVER start consecutive sentences or bullets the same way
+- NEVER write more than 2-3 sentences in a row without a bullet list or section break
+- Avoid slang, profanity, or overly emotional language"""
 
 
 def generate_phase2_doc(pr_data: dict, diff_text: str, api_key: str,
@@ -156,19 +168,32 @@ Return ONLY valid JSON, no markdown fences, no explanation."""
 The PR addresses these specific issues (items 1-{len(turn1_items)}):
 {turn1_item_hints}
 
-Write a 150-250 word prompt that sounds like a competent developer describing a real problem to a colleague.
+Write a 150-300 word STRUCTURED prompt. Start with a 1-2 sentence summary, then use bold-labeled sections and bullet points.
 Be VAGUE enough that the reader has to figure out the approach, but clear about what the problem IS.
 Dont list the changes needed. Dont mention specific functions to fix. Describe the symptoms and what "fixed" looks like.
 A good developer reading this should NATURALLY discover items 1-{len(turn1_items)} by understanding the problem well.
 
-BAD example (too formal, too AI):
-"Currently, the allocation logic is spread across several files. Ideally, we want to reduce the number of separate allocations. Done means faster creation."
+BAD example (wall of text, no structure, buried instructions):
+"Currently, the allocation logic is spread across several files. Ideally, we want to reduce the number of separate allocations. This makes the code harder to follow for anyone new. The config helpers are also outdated. Done means faster creation and the tests pass."
 
-BAD example (too casual, too slangy):
-"this is a freakin nightmare, honestly breaks my brain, the whole thing is death by a thousand cuts"
+BAD example (too formal, template-y headers):
+"## Objective\nRemove deprecated APIs.\n## Scope\nThe client module.\n## Success Criteria\n- Build passes."
 
-GOOD example (natural developer tone):
-"We have a problem with chat sessions sticking around in the background, even when they arent actively being used in the chat view. This is mostly happening with the local chat agent. Its causing unnecessary resource consumption, especially if someone starts a bunch of these sessions and forgets about them. The current config setting helps, but its a global setting. We need a way to prevent these background sessions from being created in certain scenarios. E.g., quick chat sessions shouldnt persist."
+GOOD example (structured but human):
+"Chat sessions are sticking around in the background even when nobody is using them. Mostly the local chat agent. Its eating resources, especially when someone spawns a bunch and forgets about them.
+
+**Where this shows up:**
+- Background session lifecycle in the chat view layer
+- The global config toggle that controls keepalive (too coarse)
+
+**What needs to happen:**
+- Sessions created for quick/disposable use shouldnt persist after the view closes
+- The keepalive setting needs a per-session override, not just the global flag
+
+**Done when:**
+- Quick chat sessions dont survive past their parent view
+- Existing long-lived sessions still work as before
+- Tests cover both paths"
 
 Return ONLY the prompt text, nothing else."""
 

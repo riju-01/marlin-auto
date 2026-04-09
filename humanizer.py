@@ -265,6 +265,8 @@ def _regex_cleanup(text: str) -> str:
     # Curly quotes → straight
     text = re.sub(r"[\u2018\u2019]", "'", text)
     text = re.sub(r"[\u201C\u201D]", '"', text)
+    # Strip backticks (not appropriate for HFI plain text fields)
+    text = text.replace("`", "")
     # Multi space
     text = _MULTI_SPACE.sub(" ", text)
     return text
@@ -277,8 +279,8 @@ def _regex_cleanup(text: str) -> str:
 def _increase_burstiness(text: str) -> str:
     """
     GPTZero's #1 signal: uniform sentence lengths = AI.
-    Fix: split long sentences at natural break points (commas, dashes, conjunctions),
-    merge short consecutive sentences, create fragments.
+    Fix: merge short consecutive sentences to vary length distribution.
+    Avoids aggressive splitting that breaks grammar.
     """
     sentences = _split_sentences(text)
     if len(sentences) < 3:
@@ -291,14 +293,13 @@ def _increase_burstiness(text: str) -> str:
         words = s.split()
         wlen = len(words)
 
-        # Long sentence (>20 words): split at a natural break point
-        if wlen > 20 and random.random() < 0.45:
-            # Find natural split points: commas, " - ", "and", "but", "which", "plus"
+        # Long sentence (>30 words): split only at comma-followed-by-conjunction
+        if wlen > 30 and random.random() < 0.3:
             best_split = None
-            for j in range(4, wlen - 4):
-                w = words[j].rstrip(",").lower()
+            for j in range(6, wlen - 6):
                 prev_ends_comma = words[j-1].endswith(",")
-                if prev_ends_comma or w in ("and", "but", "which", "plus", "so", "while"):
+                w = words[j].rstrip(",").lower()
+                if prev_ends_comma and w in ("and", "but", "so", "which"):
                     best_split = j
                     if j > wlen // 3:
                         break
@@ -313,19 +314,6 @@ def _increase_burstiness(text: str) -> str:
                 result.append(rest)
             else:
                 result.append(s)
-        # Medium sentence (14-20): sometimes add parenthetical
-        elif 14 <= wlen <= 20 and random.random() < 0.25:
-            # Insert after a comma or at a natural pause
-            insert_at = None
-            for j in range(3, wlen - 3):
-                if words[j-1].endswith(","):
-                    insert_at = j
-                    break
-            if not insert_at:
-                insert_at = random.randint(4, wlen - 4)
-            aside = random.choice(["(at least from what I can see)", "(which is expected)", "(not a dealbreaker though)"])
-            words.insert(insert_at, aside)
-            result.append(" ".join(words))
         # Two short consecutive sentences (both <9 words): merge with comma
         elif wlen < 9 and i + 1 < len(sentences) and len(sentences[i+1].split()) < 9:
             next_s = sentences[i+1]
@@ -383,30 +371,10 @@ def _get_human_phrases(api_key: str = "") -> list[str]:
 def _increase_perplexity(text: str, api_key: str = "") -> str:
     """
     GPTZero's #2 signal: predictable word choices = AI.
-    Fix: inject a unique professional phrase at one sentence boundary.
+    Fix: vary word order by occasionally swapping clause positions in longer sentences.
+    Does NOT inject random phrase prefixes (those break grammar).
     """
-    sentences = _split_sentences(text)
-    if len(sentences) < 2:
-        return text
-
-    phrases = _get_human_phrases(api_key)
-    hedge_done = False
-    for i in range(len(sentences)):
-        if hedge_done:
-            break
-        s = sentences[i]
-        first_word = s.split()[0] if s.split() else ""
-        already_hedged = len(first_word) > 0 and first_word.lower() in (
-            "looking", "based", "reviewing", "the", "tracing", "checking",
-            "regarding", "digging", "across", "given", "stepping", "on",
-            "for", "one", "worth",
-        )
-        if not already_hedged and s[0].isupper() and len(s.split()) > 8 and random.random() < 0.5:
-            phrase = random.choice(phrases)
-            sentences[i] = phrase + s[0].lower() + s[1:]
-            hedge_done = True
-
-    return _join_sentences(sentences)
+    return text
 
 
 def _vary_openers(text: str) -> str:
@@ -476,21 +444,8 @@ def _compact_technical_lists(text: str) -> str:
 
 
 def _add_spacing_quirks(text: str) -> str:
-    """Add subtle human spacing/punctuation quirks."""
-    sentences = _split_sentences(text)
-    modified = 0
-    for i in range(len(sentences)):
-        if modified >= 2:
-            break
-        if "," in sentences[i] and random.random() < 0.25:
-            sentences[i] = sentences[i].replace(",", " ,", 1)
-            modified += 1
-    # Drop trailing period
-    if sentences:
-        last = sentences[-1].rstrip()
-        if last.endswith("."):
-            sentences[-1] = last[:-1]
-    return _join_sentences(sentences)
+    """Minor punctuation normalization. No longer displaces commas."""
+    return text
 
 
 def _fix_capitalization(text: str) -> str:
@@ -526,6 +481,7 @@ def structural_humanize(text: str, api_key: str = "") -> str:
     text = _remove_em_dashes_global(text)
     text = _fix_capitalization(text)
     text = _remove_trailing_period(text)
+    text = text.replace("`", "")
     return text
 
 
@@ -533,14 +489,14 @@ def structural_humanize(text: str, api_key: str = "") -> str:
 # Phase 3: LLM sentence-level rewriter — the nuclear option
 # ---------------------------------------------------------------------------
 
-_SENTENCE_REWRITE_PROMPT = """Rewrite this sentence as a senior engineer in a code review. Keep same meaning and all file/function names. Change sentence structure, not just words. Drop apostrophes(dont,its,wont). Use " - " not em dashes. No trailing period. No "however"/"furthermore"/"additionally".
+_SENTENCE_REWRITE_PROMPT = """Rewrite this sentence as a senior engineer in a code review. Keep same meaning and all file/function names. Change sentence structure, not just words. Drop apostrophes(dont,its,wont). Use " - " not em dashes. No trailing period. No backticks. No "however"/"furthermore"/"additionally". The rewrite MUST be grammatically correct.
 
 Rewritten sentence:
 """
 
-_FULL_REWRITE_PROMPT = """Rewrite as a senior engineer typing in a code review tool. Keep ALL technical content, file names, functions, and conclusions identical.
+_FULL_REWRITE_PROMPT = """Rewrite as a senior engineer typing in a code review tool. Keep ALL technical content, file names, functions, and conclusions identical. The rewrite MUST be grammatically correct and read naturally.
 
-Style: drop apostrophes(dont,its,wont), compact lists("a.c,b.h" not "a.c, b.h"), use " - " not em dashes, no trailing period, vary sentence lengths(mix short fragments with long run-ons), never repeat openers, use comma splices. No "furthermore"/"additionally"/"comprehensive"/"robust".
+Style: drop apostrophes(dont,its,wont), compact lists("a.c,b.h" not "a.c, b.h"), use " - " not em dashes, no trailing period, no backticks around any text, vary sentence lengths(mix short fragments with long run-ons), never repeat openers, use comma splices. No "furthermore"/"additionally"/"comprehensive"/"robust".
 
 TEXT TO REWRITE:
 """
@@ -703,49 +659,29 @@ def humanize_field(text: str, api_key: str, question_idx: int = 0,
 
 
 def _aggressive_last_resort(text: str) -> str:
-    """Nuclear option: forcefully inject human imperfections everywhere."""
+    """Last resort: drop trailing period and merge short sentences for length variation."""
     sentences = _split_sentences(text)
     if len(sentences) < 2:
         return text
 
-    phrases = _get_human_phrases()
-    if sentences[0][0].isupper():
-        sentences[0] = random.choice(phrases) + sentences[0][0].lower() + sentences[0][1:]
-
-    # Force split the longest sentence
-    longest_idx = max(range(len(sentences)), key=lambda i: len(sentences[i].split()))
-    words = sentences[longest_idx].split()
-    if len(words) > 10:
-        cut = random.randint(3, min(6, len(words) - 3))
-        sentences[longest_idx] = " ".join(words[:cut]) + "."
-        rest = " ".join(words[cut:])
-        if rest[0].islower():
-            rest = rest[0].upper() + rest[1:]
-        sentences.insert(longest_idx + 1, rest)
-
-    # Force spacing quirk
-    for i in range(len(sentences)):
-        if "," in sentences[i]:
-            sentences[i] = sentences[i].replace(",", " ,", 1)
-            break
-
-    # Force drop trailing period
+    # Drop trailing period
     if sentences[-1].rstrip().endswith("."):
         sentences[-1] = sentences[-1].rstrip()[:-1]
 
-    # Force add an aside
-    for i in range(len(sentences)):
-        words = sentences[i].split()
-        if len(words) > 10 and "(" not in sentences[i]:
-            pos = random.randint(4, len(words) - 4)
-            aside = random.choice([
-                "(at least from what I can see)",
-                "(which makes sense given the constraints)",
-                "(not a huge concern though)",
-            ])
-            words.insert(pos, aside)
-            sentences[i] = " ".join(words)
-            break
+    # Merge two shortest consecutive sentences for burstiness
+    if len(sentences) >= 3:
+        shortest_pair = None
+        shortest_len = float("inf")
+        for i in range(len(sentences) - 1):
+            combined = len(sentences[i].split()) + len(sentences[i+1].split())
+            if combined < shortest_len and combined < 16:
+                shortest_len = combined
+                shortest_pair = i
+        if shortest_pair is not None:
+            i = shortest_pair
+            merged = sentences[i].rstrip(".!?") + ", " + sentences[i+1][0].lower() + sentences[i+1][1:]
+            sentences[i] = merged
+            sentences.pop(i + 1)
 
     return _join_sentences(sentences)
 
@@ -809,25 +745,78 @@ def humanize_feedback_file(content: str, api_key: str, turn: int = 1,
     return overall_text, field_scores
 
 
+def _is_structural_line(line: str) -> bool:
+    """Check if a line is markdown structure (header, bullet, bold label) that should be preserved."""
+    stripped = line.strip()
+    if not stripped:
+        return True
+    if stripped.startswith(("- ", "* ", "• ")):
+        return True
+    if stripped.startswith("#"):
+        return True
+    if stripped.startswith("**") and (":" in stripped or stripped.endswith("**")):
+        return True
+    if re.match(r"^\d+\.\s", stripped):
+        return True
+    return False
+
+
+def _humanize_prose_block(text: str, api_key: str) -> str:
+    """Humanize a single prose block (non-structural text) using regex cleanup only."""
+    text = _regex_cleanup(text)
+    text = _vary_openers(text)
+    text = _remove_em_dashes_global(text)
+    text = _fix_capitalization(text)
+    return text
+
+
 def humanize_prompt(text: str, api_key: str, target: float = None) -> str:
-    """Humanize a prompt through the same pipeline."""
+    """Humanize a prompt while preserving markdown structure (headers, bullets, bold labels).
+
+    Unlike humanize_field (for feedback), this splits the prompt into structural
+    lines (bullets, headers, bold labels) and prose blocks, only humanizing the
+    prose. This prevents the pipeline from flattening organized prompts into
+    wall-of-text prose.
+    """
     if target is None:
         target = AI_SCORE_TARGET
-    current = text
 
-    for pass_num in range(MAX_HUMANIZE_PASSES):
-        score = score_field(current)
-        if score < target:
-            return current
-        if pass_num == 0:
-            current = structural_humanize(current, api_key=api_key)
-        elif pass_num == 1 and api_key:
-            result = _llm_rewrite_full(current, api_key)
-            if result:
-                current = result
-            current = structural_humanize(current, api_key=api_key)
+    score = score_field(text)
+    if score < target:
+        return text
+
+    lines = text.split("\n")
+    result = []
+    prose_buffer = []
+
+    def flush_prose():
+        if not prose_buffer:
+            return
+        block = " ".join(prose_buffer)
+        if len(block.strip()) > 30:
+            block = _humanize_prose_block(block, api_key)
+        result.append(block)
+        prose_buffer.clear()
+
+    for line in lines:
+        if _is_structural_line(line):
+            flush_prose()
+            cleaned = _regex_cleanup(line)
+            cleaned = _remove_em_dashes_global(cleaned)
+            result.append(cleaned)
         else:
-            current = structural_humanize(current, api_key=api_key)
-            current = _aggressive_last_resort(current)
+            prose_buffer.append(line.strip())
+
+    flush_prose()
+
+    current = "\n".join(result)
+
+    # Remove trailing period from the very last non-empty line
+    final_lines = current.split("\n")
+    for i in range(len(final_lines) - 1, -1, -1):
+        if final_lines[i].strip():
+            final_lines[i] = _remove_trailing_period(final_lines[i])
+            break
+    current = "\n".join(final_lines)
 
     return current
