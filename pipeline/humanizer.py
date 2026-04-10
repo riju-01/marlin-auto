@@ -56,9 +56,8 @@ _FILLER_PHRASES = [
     (re.compile(r"\bNonetheless,?\s*"), ""),
     (re.compile(r"\bnonetheless,?\s*"), ""),
     (re.compile(r"\bIn conclusion,?\s*", re.I), ""),
-    (re.compile(r"\bOverall,?\s+", re.I), ""),
     (re.compile(r"\bUltimately,?\s*", re.I), ""),
-    (re.compile(r"\bEssentially,?\s*", re.I), ""),
+    (re.compile(r"\bEssentially,?\s*", re.I), "Basically "),
     (re.compile(r"\bSpecifically,?\s*", re.I), ""),
     (re.compile(r"\bCrucially,?\s*", re.I), ""),
     (re.compile(r"\bImportantly,?\s*", re.I), ""),
@@ -76,7 +75,7 @@ _FILLER_PHRASES = [
     (re.compile(r"\bWhile this\b"), "This"),
     (re.compile(r"\bAs a result,?\s*"), "So "),
     (re.compile(r"\bas a result,?\s*"), "so "),
-    # Remove overly casual filler
+    # Remove overly casual filler (but preserve Indian-English markers)
     (re.compile(r"\b[Ss]eems like\s+(?:okay|alright)?,?\s*"), ""),
     (re.compile(r"\b[Pp]retty sure\s+"), ""),
     (re.compile(r"\b[Ff]rom what I can see\s*,?\s*"), ""),
@@ -84,13 +83,17 @@ _FILLER_PHRASES = [
     (re.compile(r"\b[Ii] guess\s+"), ""),
     (re.compile(r"\b[Ii] think\s+,?\s*"), ""),
     (re.compile(r"\b[Oo]kay\s*,?\s*"), ""),
-    (re.compile(r"\b[Ll]ets\s+(?:take a look|look|see|review|dive)\b"), "Reviewing"),
+    (re.compile(r"\b[Ll]ets\s+(?:take a look|look|see|review|dive)\b"), "Checking"),
     (re.compile(r"\b[Gg]otta\b"), "need to"),
     (re.compile(r"\b[Ss]uper\s+(?:clear|helpful|good)\b"), "clear"),
     (re.compile(r"\b[Nn]eat\b"), "good"),
-    (re.compile(r"\balright\b"), "reasonable"),
+    (re.compile(r"\balright\b"), "fine"),
     (re.compile(r"\b[Aa]t least from what I can see\s*,?\s*"), ""),
     (re.compile(r"\bwhich is expected\s*,?\s*"), ""),
+    # NOTE: DO NOT strip "basically", "the thing is", "only" (emphasis),
+    # "itself", "as such", "proper/properly" -- these are Indian-English
+    # markers that actively help beat AI detection by adding human
+    # imperfections and informal hedges.
 ]
 
 _AI_WORD_SWAPS = [
@@ -339,13 +342,14 @@ def _get_human_phrases(api_key: str = "") -> list[str]:
 
     if api_key:
         prompt = (
-            "Generate 20 short sentence-starter phrases (2-5 words each) that a senior software "
-            "engineer would naturally use when writing code review feedback. Mix of:\n"
+            "Generate 20 short sentence-starter phrases (2-5 words each) that an Indian software "
+            "developer would naturally use when grading code in a review. Mix of:\n"
+            "- Evaluative verdicts: starting a judgment about code correctness\n"
             "- Transitional: connecting one observation to the next\n"
-            "- Evaluative: starting a judgment about code quality\n"
             "- Observational: noting something specific in the diff\n\n"
             "Rules: no formal words(Furthermore,Additionally,Moreover). No casual words"
-            "(pretty sure,seems like,I think,I guess). Professional but natural.\n"
+            "(pretty sure,seems like,I think,I guess). Direct and blunt, like grading a test.\n"
+            "Can use Indian dev patterns: 'Basically', 'The thing is', 'See the'\n"
             "Output ONLY the phrases, one per line, each ending with a comma or space."
         )
         result = llm_generate(prompt, api_key=api_key)
@@ -357,13 +361,14 @@ def _get_human_phrases(api_key: str = "") -> list[str]:
                 return _phrase_cache
 
     _phrase_cache = [
-        "Looking at the diff, ", "The changes in ", "Tracing the code, ",
-        "Checking the dealloc path, ", "The flag handling here ", "On the alloc side, ",
-        "Reviewing the modifications, ", "The conditional logic in ", "Worth checking whether ",
-        "One concern with ", "The approach taken in ", "Digging into ", "For the memory mgmt, ",
-        "Across the modified files, ", "The interaction between ", "Regarding the new flags, ",
-        "On closer inspection, ", "The test coverage for ", "Given the complexity here, ",
-        "Stepping through the flow, ",
+        "Basically ", "The thing is ", "See the changes in ",
+        "Checking ", "The logic in ", "On the alloc side, ",
+        "The conditional path in ", "Problem here is ",
+        "One gap is ", "Looking at ", "For the memory mgmt, ",
+        "Across modified files, ", "The interaction between ",
+        "Main issue is ", "Test coverage for ", "This part is ",
+        "Tracing the flow, ", "Not done properly - ", "Correct only if ",
+        "Missing here is ",
     ]
     return _phrase_cache
 
@@ -489,14 +494,14 @@ def structural_humanize(text: str, api_key: str = "") -> str:
 # Phase 3: LLM sentence-level rewriter — the nuclear option
 # ---------------------------------------------------------------------------
 
-_SENTENCE_REWRITE_PROMPT = """Rewrite this sentence as a senior engineer in a code review. Keep same meaning and all file/function names. Change sentence structure, not just words. Drop apostrophes(dont,its,wont). Use " - " not em dashes. No trailing period. No backticks. No "however"/"furthermore"/"additionally". The rewrite MUST be grammatically correct.
+_SENTENCE_REWRITE_PROMPT = """Rewrite this sentence as an Indian developer grading code in a review tool. Keep same meaning and all file/function names. Change sentence structure, not just words. Drop apostrophes(dont,its,wont). Drop articles occasionally(check alignment not check the alignment). Use " - " not em dashes. No trailing period. No backticks. No "however"/"furthermore"/"additionally". Keep any "basically"/"the thing is"/"only"(emphasis)/"itself" - these are natural filler. The rewrite MUST read naturally.
 
 Rewritten sentence:
 """
 
-_FULL_REWRITE_PROMPT = """Rewrite as a senior engineer typing in a code review tool. Keep ALL technical content, file names, functions, and conclusions identical. The rewrite MUST be grammatically correct and read naturally.
+_FULL_REWRITE_PROMPT = """Rewrite as an Indian developer grading code in a review tool. Keep ALL technical content, file names, functions, and conclusions identical. The rewrite MUST read naturally.
 
-Style: drop apostrophes(dont,its,wont), compact lists("a.c,b.h" not "a.c, b.h"), use " - " not em dashes, no trailing period, no backticks around any text, vary sentence lengths(mix short fragments with long run-ons), never repeat openers, use comma splices. No "furthermore"/"additionally"/"comprehensive"/"robust".
+Style: drop apostrophes(dont,its,wont), drop articles sometimes(check alignment not check the alignment), compact lists("a.c,b.h" not "a.c, b.h"), use " - " not em dashes, no trailing period, no backticks around any text, vary sentence lengths(mix short verdicts with long run-on analysis), never repeat openers, use comma splices. No "furthermore"/"additionally"/"comprehensive"/"robust". Keep "basically"/"the thing is"/"only"(emphasis)/"itself"/"proper" - these are natural Indian dev filler that helps avoid AI detection.
 
 TEXT TO REWRITE:
 """
