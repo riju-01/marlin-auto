@@ -38,20 +38,24 @@ FORMAT:
 - Write as CONTINUOUS PARAGRAPHS. No headings, no bold labels, no bullet points, no markdown
 - NO "**Where to look:**" or "**Done when:**" sections. Weave everything into flowing prose
 - 150-300 words total, written as 3-5 connected paragraphs
-- Each paragraph should flow naturally into the next like a developer explaining a task conversationally
+- Each paragraph should flow naturally into the next
 
 TONE:
-- Write like a developer explaining a task to a colleague in a message or email
-- Tone: senior engineer who typed this in 3 minutes. Not angry, not formal. Just clear
+- Write like an Indian developer explaining a bug or task to a teammate on Slack
+- Direct, practical, no-nonsense. Not angry, not formal - just clear about whats broken and what needs fixing
 - Drop apostrophes naturally: dont, its, wont, doesnt, cant, shouldnt
+- Drop articles sometimes: "check alignment" not "check the alignment", "fix config" not "fix the config"
 - Mix sentence lengths. Some short, some longer with commas connecting related thoughts
-- Use abbreviations where natural: param, repo, config, deps, e.g.
+- Use abbreviations where natural: param, repo, config, deps, impl, e.g.
+- Use "basically" or "the thing is" once or twice per prompt - natural Indian dev filler
+- Use "proper"/"properly" instead of formal words like "comprehensive"/"thoroughly"
+- Occasionally use "only" as emphasis: "thats the core issue only"
 
 CONTENT:
 - Start with what the problem is and why it matters (1-2 sentences)
 - Then describe where to look and what areas are involved
 - Then describe what needs to happen (the what, not the how)
-- End with what "done" looks like — woven into the final sentences, not as a labeled list
+- End with what "done" looks like - woven into the final sentences, not as a labeled list
 - Describe the PROBLEM, not the solution
 - Reference general areas (modules, packages, config names) but be VAGUE about exact fixes
 - No trailing period on the last sentence
@@ -62,6 +66,7 @@ NEVER:
 - NEVER use markdown formatting of any kind
 - NEVER use: "Ideally", "Currently", "Additionally", "Furthermore", "Notably"
 - NEVER start consecutive sentences the same way
+- NEVER use overly formal phrasing: "comprehensive", "robust", "demonstrates", "facilitates"
 - Avoid slang, profanity, or overly emotional language"""
 
 
@@ -282,14 +287,14 @@ BAD example (has headings and bullets — we dont want this):
 BAD example (too formal, uses AI words):
 "Currently, the allocation logic is spread across several files. Ideally, we want to reduce the number of separate allocations. Additionally, the config helpers are outdated."
 
-GOOD example (continuous paragraphs, conversational, no formatting):
-"Chat sessions are sticking around in the background even when nobody is using them. Mostly the local chat agent, its eating resources especially when someone spawns a bunch and forgets about them.
+GOOD example (continuous paragraphs, Indian dev tone, no formatting):
+"Chat sessions are sticking around in background even when nobody is using them. Basically the local chat agent is eating resources, especially when someone spawns a bunch and forgets about them.
 
-You can look in the chat view layer where the background session lifecycle is managed. The global config toggle that controls keepalive is too coarse right now, it applies to everything instead of letting each session type decide.
+The thing is the chat view layer where background session lifecycle is managed - the global config toggle for keepalive is too coarse right now, it applies to everything instead of letting each session type decide on its own.
 
-Sessions created for quick or disposable use shouldnt persist after the view closes, but the long-lived ones still need to work as before. The keepalive setting needs a per-session override not just the global flag.
+Sessions created for quick or disposable use shouldnt persist after view closes, but long-lived ones still need to work as before. The keepalive setting needs a per-session override not just global flag.
 
-The task will be done when quick chat sessions dont survive past their parent view, existing sessions still work, and tests cover both paths"
+Task is done when quick chat sessions dont survive past their parent view, existing sessions still work properly, and tests cover both paths"
 
 Return ONLY the prompt text as continuous paragraphs, nothing else."""
 

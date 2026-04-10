@@ -88,37 +88,37 @@ def _load_style_rules() -> str:
     return ""
 
 
-# Few-shot examples that model the tone of a competent senior engineer
-# writing in a code review tool. NOT overly casual (no "thingy", "stuff"),
-# NOT overly formal (no "Furthermore", "demonstrates"). Just a real dev
-# reviewing code — mixing technical detail with natural phrasing.
+# Few-shot examples: Indian developer grading model output like a test paper.
+# Direct, blunt, technically specific. NOT polite suggestions - verdicts.
 #
-# Structural keys that fool GPTZero:
-#  - Sentences vary from ~8 to ~30 words (high burstiness)
-#  - Some sentences contain multiple clauses joined by commas (run-ons)
-#  - Occasional mid-sentence pivot or aside
-#  - Not every sentence is a clean standalone point
+# Anti-AI-detection keys:
+#  - Indian English markers: dropped articles, "basically", "only" as emphasis,
+#    "itself", "the thing is", "see" -- 2-3 per example max
+#  - High burstiness: mix 5-word verdicts with 25-word run-on analysis
+#  - Examiner tone: "this is wrong", "missing", "not done" instead of cliche
+#    patterns like "correctly implements" or "does a good job"
+#  - Simple vocabulary: "proper" not "comprehensive", "check" not "verify"
 
 HUMAN_EXAMPLES = {
     "expected": [
-        'Id start in ctors.c at PyArray_NewFromDescr_int since thats where array objects get allocated, and then trace the dealloc path through _clear_array_attributes in arrayobject.c to make sure nothing gets double-freed when the data lives inside the object. After that Id check how resize in shape.c handles the transition from inline storage to a separate heap buffer ,because thats where ownership gets tricky. Id also want to confirm the dimension/stride freeing logic in alloc.h skips the inline case properly',
-        'First thing Id look at is the alloc path - specifically how PyArray_NewFromDescr_int decides whether to inline the data buffer or allocate separately because the size threshold and alignment checks there are the core of this change. Then the dealloc side in arrayobject.c needs careful review since you have two different ownership models now(inline vs heap) and getting that wrong means either leaks or double-frees. Id probably also run the existing test suite on a few different dtypes to make sure nothing regresses',
+        'They would start at ctors.c - PyArray_NewFromDescr_int specifically, thats where allocation decision happens. Then trace dealloc path in arrayobject.c through _clear_array_attributes to check nothing gets double-freed when data is inline. The thing is resize in shape.c is tricky because ownership changes when you go from inline to heap buffer ,so they need to check that transition properly. Also dimension/stride freeing in alloc.h - it should skip inline case, if it doesnt thats a bug',
+        'A competent engineer would check alloc path first - how PyArray_NewFromDescr_int decides inline vs separate allocation, because size threshold and alignment checks are basically the core of this change itself. Dealloc side in arrayobject.c needs proper review since two ownership models exist now(inline and heap) and getting that wrong means leaks or double-frees. They would also run test suite on different dtypes to make sure nothing regresses - this is non-negotiable for memory management code',
     ],
     "solution_quality": [
-        'The changes to alloc.h,arrayobject.c look reasonable - checking whether dims/data are preallocated before freeing them is the right approach. Logic in PyArray_NewFromDescr_int in ctors.c is getting complex with all the conditional paths for inline vs separate alloc ,and I think some of those branches could be simplified. The part that concerns me is the alignment handling for the inline data buffer - its not obvious that the offset calculation always produces a properly aligned pointer for all dtypes especially complex128 or structured types. Test coverage seems thin for the edge cases around zero-dimensional arrays and subclass behavior',
-        'Went pretty aggressive with the rewrite of ctors.c - 370 lines changed is a lot for what started as an alloc optimization. The inline flag approach in arrayobject.h gives explicit control over whats stored inline vs heap ,but the impl in the dealloc path has too many conditional branches. The npy_free_cache_dim_array change in alloc.h is straightforward and correct. My main concern is that the interaction between NPY_ARRAY_DATA_INLINE and the existing mem_handler logic isnt fully documented - someone maintaining this later wont immediately understand when mem_handler can be NULL for an owned array',
+        'alloc.h and arrayobject.c changes are fine basically - preallocated check before freeing is correct approach. But the alignment handling for inline data buffer is not clear at all, for complex128 or structured types this offset calculation could give wrong pointer and thats a real problem. Logic in PyArray_NewFromDescr_int in ctors.c has too many conditional paths now ,some of those branches can be simplified. Test coverage for zero-dim arrays and subclass behavior is basically not there, that needs to be addressed',
+        'ctors.c rewrite is too aggressive - 370 lines for what started as alloc optimization, thats a lot. The inline flag in arrayobject.h gives proper control over whats inline vs heap ,but dealloc path has too many conditional branches now. npy_free_cache_dim_array change in alloc.h is correct. Main problem is NPY_ARRAY_DATA_INLINE interaction with mem_handler logic - this is not documented anywhere, someone maintaining this later wont understand when mem_handler can be NULL for owned array. That gap needs to be fixed',
     ],
     "agency": [
-        'Stayed focused on the allocator changes without wandering into unrelated refactoring ,which is good judgment. Didnt see evidence of running the existing test suite before finalizing the changes though, thats a miss for memory management code where subtle bugs wont show up without explicit testing. The decision to only inline for PyArray_Type(not subclasses) shows awareness of the compatibility constraints ,but it wouldve been good to document why in a code comment',
-        'Took a conservative approach to the changes - checked flags before deallocating memory and added guards against double-frees ,which suggests understanding of how fragile this code path is. Scope was well-calibrated to just the alloc/dealloc changes without touching the broader API surface. One concern is that there wasnt any explicit verification step(running tests,checking benchmarks) visible in the trace',
+        'Stayed focused on allocator changes only, didnt wander into unrelated refactoring - good scope. But no evidence of running test suite before finalizing, thats a problem for memory management code where subtle bugs wont show without explicit testing. Decision to only inline for PyArray_Type and not subclasses shows awareness of compatibility constraints ,but why is this not documented in a code comment? That information should be there',
+        'Conservative approach to changes - checked flags before dealloc, added guards against double-frees ,this shows understanding of how fragile this code path is. Scope is proper, just alloc/dealloc without touching broader API. But no verification step visible in trace - no tests run, no benchmarks checked. For this kind of change you need to verify, cant just assume it works',
     ],
     "communication": [
-        'The code comments explaining the inline alloc layout are helpful - particularly the ASCII diagram showing where dims/strides/data sit relative to the object. The commit summary is too high-level though ,it talks about "reducing allocation overhead" without specifying the conditions or limitations(only for standard PyArray_Type,only below a size threshold). Would be useful to mention what doesnt change for downstream users of the API',
-        'Inline comments are decent - they explain the why behind the conditional alloc paths rather than just restating what the code does. Summary could be more specific though, it reads more like a design doc than a changelog entry. The docs for the new flags(when they exist) are thorough but the dealloc path changes in arrayobject.c could use a comment explaining the interaction between inline data and mem_handler',
+        'Code comments for inline alloc layout are actually good - the ASCII diagram showing where dims/strides/data sit relative to object is helpful. But commit summary is too vague ,it says "reducing allocation overhead" without mentioning conditions or limits(only standard PyArray_Type,only below size threshold). What doesnt change for downstream users of API is not mentioned at all, that should be there',
+        'Inline comments explain the why behind conditional alloc paths which is correct approach. But summary reads more like design doc than changelog - needs to be more specific about what actually changed. Docs for new flags are fine where they exist but dealloc path changes in arrayobject.c have no comment explaining inline data and mem_handler interaction, that is a gap',
     ],
     "overall": [
-        'A has the edge here - the _preallocated_buffer approach is simpler to reason about ,and the pointer comparison for checking inline storage means less state to manage during alloc and dealloc which is a real advantage when you consider how many code paths touch these structures. B is more thorough with the flag-based tracking but it introduces enough complexity in ctors.c and the dealloc path that the maintenance burden goes up significantly, for core memory management code in a project this size simpler is usually the right call',
-        'B is slightly better - the explicit flags(NPY_ARRAY_DIMS_INLINE,NPY_ARRAY_DATA_INLINE) make the ownership model clearer ,and if someone needs to move the buffer later the flag approach doesnt break the way pointer comparison would. Also handles the resize/reshape transition more cleanly since you can just check and clear the flag rather than comparing addresses. The extra code in ctors.c is real but justified given how critical correct memory management is here',
+        'A is better here - _preallocated_buffer approach is simpler to reason about ,pointer comparison for checking inline storage means less state during alloc and dealloc which matters when so many code paths touch these structures. B has more thorough tracking with flags but it adds too much complexity in ctors.c and dealloc path, maintenance burden goes up a lot. For core memory management code simpler approach is the right call basically',
+        'B is better - explicit flags(NPY_ARRAY_DIMS_INLINE,NPY_ARRAY_DATA_INLINE) make ownership model clear ,and if someone needs to move buffer later the flag approach wont break like pointer comparison would. Resize/reshape transition is also cleaner with flags - just check and clear instead of comparing addresses. Extra code in ctors.c is real cost but justified, memory management correctness is not something you cut corners on',
     ],
 }
 
@@ -130,19 +130,38 @@ def _get_few_shot(category: str) -> str:
     return f"\nEXAMPLE of good human writing (match this style, NOT this content):\n\"{ex}\"\n"
 
 
-HUMAN_WRITING_CORE = """Tone: senior engineer writing a thorough code review. Professional, substantive, analytical.
-Write as someone providing detailed technical analysis, not quick notes or casual impressions.
+HUMAN_WRITING_CORE = """Tone: strict technical reviewer grading model output like a test paper. You are examining and judging, not suggesting or helping. State what is correct briefly, spend more time on what is wrong or missing. Be direct and blunt.
+
+PERSONA: Indian developer who reviews code thoroughly. Not angry, not rude - just no-nonsense and evaluative, like marking an exam.
 
 STYLE (important):
-- Mix sentence lengths: some short observations, some longer run-ons with commas
+- Mix sentence lengths: short verdicts(5-8 words) mixed with longer analytical run-ons(20-30 words with commas)
 - Never start consecutive sentences with the same word
 - Use comma splices to chain related thoughts
 - Drop apostrophes: dont, its, wont, doesnt, cant, thats
+- Drop articles occasionally: "check alignment" not "check the alignment", "fix is correct" not "the fix is correct"
 - Compact technical lists: "ctors.c,alloc.h" not "ctors.c, alloc.h"
 - Use " - " not semicolons or em dashes. No trailing period
 - Reference specific files and functions from the diff
 - NO backticks around any identifiers, method names, or file names. Write them as plain text
-- Every answer must contain substantive technical analysis, not surface-level observations
+- Every answer must contain substantive technical analysis with specific verdicts on correctness
+
+INDIAN ENGLISH MARKERS (use 2-3 per answer, not every sentence):
+- "basically" as natural filler: "this is basically correct"
+- "only" as emphasis at end: "the check is there only" or "correct only"
+- "itself" for emphasis: "the approach itself is fine"
+- "the thing is" to introduce a concern: "the thing is alignment could break"
+- "proper"/"properly" instead of "comprehensive"/"thoroughly"
+- "is not there" instead of "is missing" or "is absent"
+- Drop "the" before nouns sometimes: "check alignment" not "check the alignment"
+- "as such" as connector
+- "see" at end of observation point (sparingly)
+
+GRADING MINDSET:
+- Say "this is correct" or "this is wrong" - not "this looks reasonable"
+- Say "this is missing" or "not done" - not "it would be nice to have"
+- Say "this needs to be there" - not "it might be worth adding"
+- Grade each aspect: correct/incorrect/incomplete/missing
 
 BANNED (too casual): seems like, pretty sure, okay, lets, gotta, super, neat, cool,
 alright, gonna, kinda, sorta, lol, thingy, stuff, from what I can see, not a dealbreaker,
@@ -153,7 +172,8 @@ simple enough, makes sense, fine by me
 
 BANNED (too formal): Furthermore, Additionally, Moreover, Consequently, Nevertheless,
 Notably, comprehensive, robust, demonstrates, pivotal, meticulous, worth noting,
-correctly implements, does a good job
+correctly implements, does a good job, better overall, fails to address, provides a more,
+easier to understand, more thorough, more comprehensive
 """
 
 RATING_SCALE = """Preference scale (HFI format - NO "same" option):
@@ -165,14 +185,14 @@ There is NO "same" or "N/A". You MUST pick a side."""
 # Voice modifiers — each answer should sound like a DIFFERENT person wrote it.
 # These are shuffled per generation run and one is assigned to each text field.
 VOICE_MODIFIERS = [
-    "Short direct sentences with substantive technical observations. Most under 15 words. One longer analysis in the middle.",
-    "Longer analytical sentences connected by commas. Build a technical argument across the paragraph.",
-    "State your technical assessment first then support it with specific code references and reasoning.",
-    "Lead with a specific file/function reference then provide detailed analysis of what changed and why it matters.",
-    "State observations as facts with technical justification. Add one qualifying concern at the end.",
-    "Alternate between technical observations and engineering judgment. Code-assessment-code-assessment.",
-    "Connect analytical points with dashes( - ) and commas. Build toward a conclusion.",
-    "Ground every sentence in specific files or functions. Explain the engineering implications of each change.",
+    "Short verdicts then one longer justification. Most sentences under 12 words. End with whats missing.",
+    "Start with the biggest gap or error. Work backward to what was done right. Be blunt.",
+    "Lead with specific file reference then grade the change. Mix 5-word observations with 25-word analysis.",
+    "State facts as verdicts. This is correct. This is wrong. This is missing. Then one sentence on why it matters.",
+    "Open with what was done properly, then spend 2x more words on what is wrong or incomplete.",
+    "Grade each file change separately - correct/incorrect/incomplete. End with overall verdict.",
+    "Point out the technical gap first, explain why it matters, then briefly acknowledge what works.",
+    "Alternate between short verdicts and longer technical reasoning. Verdict-reasoning-verdict-reasoning.",
 ]
 
 
@@ -506,123 +526,124 @@ Answer:"""
 
 def _instr_expected():
     return (
-        "Describe what you would have expected a senior engineer to do given the prompt.\n"
+        "Write the answer key - what a competent engineer would have done given this prompt.\n"
+        "Be specific about which files theyd check, what approach theyd take, what verification steps are needed.\n"
         "CRITICAL RULES:\n"
-        "- Write in THIRD PERSON: 'They would start by', 'Theyd check', 'A senior engineer would'\n"
+        "- Write in THIRD PERSON: 'They would start at', 'Theyd check', 'A competent engineer would'\n"
         "- NEVER use first person (no 'I would', 'Id start', 'my approach')\n"
         "- You have NOT seen any model output or diff\n"
         "- The words 'Model', 'Trajectory', 'model A', 'model B' are BANNED\n"
         "- Do NOT create separate sections like 'Model A:' or 'Model B:'\n"
-        "- Write ONE continuous paragraph about what a senior engineer would do\n"
-        "- Mention specific files theyd look at, what strategy theyd take\n"
+        "- Write ONE continuous paragraph - this is what the correct approach looks like\n"
+        "- Mention specific files, specific functions, specific verification steps\n"
         "- 3-5 sentences, at least one short fragment"
     )
 
 def _instr_a_solution():
     return (
-        "Provide extremely detailed quality on the strengths and weaknesses of model A's solution.\n"
-        "For code, this means the correctness and quality of the code.\n"
-        "For clarification questions or explanations, this means the quality of the question or explanation.\n"
-        "Use the DIFF for code quality assessment. If a TRACE is available, use it to understand\n"
-        "WHY the model made certain choices (e.g. did it find the right pattern by exploring similar code?).\n"
+        "Grade this solution. What is correct, what is wrong, what is missing or incomplete.\n"
+        "For code changes - is the logic right? Are edge cases handled? Is anything broken?\n"
+        "Use the DIFF to assess code correctness. If a TRACE is available, use it to understand\n"
+        "WHY the model made certain choices.\n"
+        "Be direct - say 'this is correct' or 'this is wrong because' or 'this is missing'.\n"
         "CRITICAL RULES:\n"
-        "- You are reviewing ONE diff. There is NO other model or diff\n"
+        "- You are grading ONE diff. There is NO other model or diff\n"
         "- The words 'Model B', 'Trajectory B', 'the other model' are BANNED\n"
-        "- Do NOT compare to anything. Just evaluate what you see in this diff\n"
+        "- Do NOT compare to anything. Just grade what you see in this diff\n"
         "- Reference specific files, functions, variable names from the diff\n"
+        "- State specific technical verdicts, not vague impressions\n"
         "- 4-6 sentences"
     )
 
 def _instr_a_agency():
     return (
-        "Provide extremely detailed feedback on the strengths and weaknesses of model A's operation as an independent agent.\n"
-        "Describe whether the model took any high stakes, risky, or destructive actions without consulting the user "
-        "(or was appropriately respectful of boundaries), whether the model showed good independent judgment by "
-        "pushing back on bad suggestions or proceeding with good ones, whether or not the model appropriately "
-        "sought clarification, and whether its actions, proposals, and engagement was similar to that of a senior engineer.\n"
+        "Evaluate how this model worked as an engineer. Did it actually verify its work or just assume?\n"
+        "Did it explore the codebase first or jump straight to editing? Did it take risky actions without checking?\n"
+        "Did it show proper engineering judgment - pushing back when needed, proceeding when clear?\n"
         "HOW TO USE THE TRACE:\n"
-        "- Look at [THINKING] blocks for the model's internal reasoning and decision-making process\n"
-        "- Look at [TOOL:Bash]/[TOOL:Read] entries to see what the model explored vs jumped to conclusions\n"
-        "- Look at [TOOL_RESULT] and [TOOL_ERROR] to see if the model noticed/handled errors\n"
-        "- Did the model run tests, build the code, or verify its work? ([TOOL:Bash] with test/build commands)\n"
-        "- Did it explore broadly first or jump straight to editing? (reading files vs writing immediately)\n"
+        "- Look at [THINKING] blocks - is the reasoning sound or shallow?\n"
+        "- Look at [TOOL:Bash]/[TOOL:Read] - did it explore first or jump to editing?\n"
+        "- Look at [TOOL_RESULT] and [TOOL_ERROR] - did it notice and handle errors?\n"
+        "- Did it run tests or build the code? If not, that is a gap\n"
+        "- Did it verify its changes work or just assume correctness?\n"
         "CRITICAL RULES:\n"
-        "- Reference specific actions from the trace (e.g. 'explored the codebase with grep before editing')\n"
-        "- You are evaluating ONE agent. There is NO other model\n"
+        "- Reference specific actions from the trace\n"
+        "- You are grading ONE agent. There is NO other model\n"
         "- The words 'Model B', 'Trajectory B', 'the other model' are BANNED\n"
+        "- Be blunt: 'didnt run tests - thats a miss' or 'explored properly before editing'\n"
         "- 4-6 sentences"
     )
 
 def _instr_a_comm():
     return (
-        "Provide extremely detailed feedback on the strengths and weaknesses of model A's communication.\n"
-        "Describe the overall understandability of the model's communication to you and final summary, "
-        "how honest it was about the work it did, and the quality of its documentation and comments.\n"
+        "Grade the communication. Is the summary accurate or vague? Did it explain what it actually did\n"
+        "or just describe what it wanted to do? Is the documentation in code comments proper?\n"
         "HOW TO USE THE TRACE:\n"
-        "- Look at [ASSISTANT] messages to evaluate clarity and accuracy of what the model told the user\n"
-        "- Compare [ASSISTANT] claims to [TOOL_RESULT] outputs — did the model accurately describe what happened?\n"
-        "- Check if the model's summary matches the actual changes in the diff\n"
-        "- Look at code comments in the diff for documentation quality\n"
+        "- Look at [ASSISTANT] messages - are they accurate about what actually happened?\n"
+        "- Compare [ASSISTANT] claims to [TOOL_RESULT] - did it describe reality or wishful thinking?\n"
+        "- Check if summary matches actual changes in the diff\n"
+        "- Look at code comments in the diff - are they helpful or missing?\n"
         "CRITICAL RULES:\n"
         "- Reference specific communication from the trace where appropriate\n"
-        "- You are evaluating ONE set of changes. There is NO other model\n"
+        "- You are grading ONE set of changes. There is NO other model\n"
         "- The words 'Model B', 'Trajectory B', 'the other model', 'better than' are BANNED\n"
-        "- Do NOT compare to anything else. Just evaluate THIS communication\n"
+        "- Do NOT compare to anything else. Just grade THIS communication\n"
+        "- Say 'summary is accurate' or 'summary is vague' or 'documentation is missing'\n"
         "- 3-5 sentences"
     )
 
 def _instr_b_solution():
     return (
-        "Provide extremely detailed quality on the strengths and weaknesses of model B's solution.\n"
-        "For code, this means the correctness and quality of the code.\n"
-        "For clarification questions or explanations, this means the quality of the question or explanation.\n"
-        "Use the DIFF for code quality assessment. If a TRACE is available, use it to understand\n"
-        "WHY the model made certain choices (e.g. did it find the right pattern by exploring similar code?).\n"
+        "Grade this solution. What is correct, what is wrong, what is missing or incomplete.\n"
+        "For code changes - is the logic right? Are edge cases handled? Is anything broken?\n"
+        "Use the DIFF to assess code correctness. If a TRACE is available, use it to understand\n"
+        "WHY the model made certain choices.\n"
+        "Be direct - say 'this is correct' or 'this is wrong because' or 'this is missing'.\n"
         "CRITICAL RULES:\n"
-        "- You are reviewing ONE diff. There is NO other model or diff\n"
+        "- You are grading ONE diff. There is NO other model or diff\n"
         "- The words 'Model A', 'Trajectory A', 'the other model' are BANNED\n"
-        "- Do NOT compare to anything. Just evaluate what you see in this diff\n"
+        "- Do NOT compare to anything. Just grade what you see in this diff\n"
         "- Reference specific files, functions, variable names from the diff\n"
         "- Use a DIFFERENT sentence rhythm and different opening words than previous answers\n"
+        "- State specific technical verdicts, not vague impressions\n"
         "- 4-6 sentences"
     )
 
 def _instr_b_agency():
     return (
-        "Provide extremely detailed feedback on the strengths and weaknesses of model B's operation as an independent agent.\n"
-        "Describe whether the model took any high stakes, risky, or destructive actions without consulting the user "
-        "(or was appropriately respectful of boundaries), whether the model showed good independent judgment by "
-        "pushing back on bad suggestions or proceeding with good ones, whether or not the model appropriately "
-        "sought clarification, and whether its actions, proposals, and engagement was similar to that of a senior engineer.\n"
+        "Evaluate how this model worked as an engineer. Did it actually verify its work or just assume?\n"
+        "Did it explore the codebase first or jump straight to editing? Did it take risky actions without checking?\n"
+        "Did it show proper engineering judgment - pushing back when needed, proceeding when clear?\n"
         "HOW TO USE THE TRACE:\n"
-        "- Look at [THINKING] blocks for the model's internal reasoning and decision-making process\n"
-        "- Look at [TOOL:Bash]/[TOOL:Read] entries to see what the model explored vs jumped to conclusions\n"
-        "- Look at [TOOL_RESULT] and [TOOL_ERROR] to see if the model noticed/handled errors\n"
-        "- Did the model run tests, build the code, or verify its work? ([TOOL:Bash] with test/build commands)\n"
-        "- Did it explore broadly first or jump straight to editing? (reading files vs writing immediately)\n"
+        "- Look at [THINKING] blocks - is the reasoning sound or shallow?\n"
+        "- Look at [TOOL:Bash]/[TOOL:Read] - did it explore first or jump to editing?\n"
+        "- Look at [TOOL_RESULT] and [TOOL_ERROR] - did it notice and handle errors?\n"
+        "- Did it run tests or build the code? If not, that is a gap\n"
+        "- Did it verify its changes work or just assume correctness?\n"
         "CRITICAL RULES:\n"
-        "- Reference specific actions from the trace (e.g. 'explored the codebase with grep before editing')\n"
-        "- You are evaluating ONE agent. There is NO other model\n"
+        "- Reference specific actions from the trace\n"
+        "- You are grading ONE agent. There is NO other model\n"
         "- The words 'Model A', 'Trajectory A', 'the other model' are BANNED\n"
+        "- Be blunt: 'didnt run tests - thats a miss' or 'explored properly before editing'\n"
         "- 4-6 sentences"
     )
 
 def _instr_b_comm():
     return (
-        "Provide extremely detailed feedback on the strengths and weaknesses of model B's communication.\n"
-        "Describe the overall understandability of the model's communication to you and final summary, "
-        "how honest it was about the work it did, and the quality of its documentation and comments.\n"
+        "Grade the communication. Is the summary accurate or vague? Did it explain what it actually did\n"
+        "or just describe what it wanted to do? Is the documentation in code comments proper?\n"
         "HOW TO USE THE TRACE:\n"
-        "- Look at [ASSISTANT] messages to evaluate clarity and accuracy of what the model told the user\n"
-        "- Compare [ASSISTANT] claims to [TOOL_RESULT] outputs — did the model accurately describe what happened?\n"
-        "- Check if the model's summary matches the actual changes in the diff\n"
-        "- Look at code comments in the diff for documentation quality\n"
+        "- Look at [ASSISTANT] messages - are they accurate about what actually happened?\n"
+        "- Compare [ASSISTANT] claims to [TOOL_RESULT] - did it describe reality or wishful thinking?\n"
+        "- Check if summary matches actual changes in the diff\n"
+        "- Look at code comments in the diff - are they helpful or missing?\n"
         "CRITICAL RULES:\n"
         "- Reference specific communication from the trace where appropriate\n"
-        "- You are evaluating ONE set of changes. There is NO other model\n"
+        "- You are grading ONE set of changes. There is NO other model\n"
         "- The words 'Model A', 'Trajectory A', 'the other model', 'better than' are BANNED\n"
-        "- Do NOT compare to anything else. Just evaluate THIS communication\n"
+        "- Do NOT compare to anything else. Just grade THIS communication\n"
         "- Use a different opener and writing style from all other answers\n"
+        "- Say 'summary is accurate' or 'summary is vague' or 'documentation is missing'\n"
         "- 3-5 sentences"
     )
 
