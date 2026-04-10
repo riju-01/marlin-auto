@@ -55,7 +55,7 @@ if _INSIDE_WSL:
 else:
     MARLIN_AUTO_DIR = f"{WORKSPACE}/marlin-auto"
 
-# Put your claude-hfi binary here (gitignored). Phase 3 copies it into each task repo.
+# Put your claude-hfi binary here (gitignored). Phase 3 references it in-place.
 HFI_LOCAL_DIR = f"{MARLIN_AUTO_DIR}/HFI"
 
 WSL_DISTRO = os.environ.get("WSL_DISTRO", "Ubuntu")

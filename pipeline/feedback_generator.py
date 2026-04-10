@@ -176,15 +176,86 @@ VOICE_MODIFIERS = [
 ]
 
 
+TRACE_GUIDE = """The TRACE shows the model's full working session: its internal reasoning ([THINKING]),
+what it said ([ASSISTANT]), what tools it ran ([TOOL:Bash], [TOOL:Read], [TOOL:Write]),
+what those tools returned ([TOOL_RESULT]) and any errors ([TOOL_ERROR]).
+Use the trace to judge HOW the model worked — its exploration strategy, whether it verified
+its changes, how it handled errors, and whether it asked for clarification vs charging ahead."""
+
+
+def generate_change_summary(turn: int, diff: str, trace: str,
+                            label: str, api_key: str) -> str:
+    """Generate a concise summary of what one model trajectory did in a turn.
+
+    Returns a short markdown-formatted summary: files changed, what was added/modified,
+    and any notable behaviors from the trace.
+    """
+    diff_excerpt = diff[:5000] if diff else "(no diff available)"
+    trace_excerpt = trace[:3000] if trace else ""
+
+    trace_section = ""
+    if trace_excerpt:
+        trace_section = f"\nTRACE (how the model worked):\n{trace_excerpt}\n"
+
+    prompt = f"""Summarize what this model did in Turn {turn}. Be specific and concise.
+
+DIFF:
+{diff_excerpt}
+{trace_section}
+Output format (use exactly this structure):
+
+**Files changed:** list each file path briefly
+**What it did:** 2-3 sentences on the substantive changes (new classes, modified methods, tests added, etc.)
+**Approach:** 1-2 sentences on how it worked (explored first vs jumped in, ran tests, handled errors)
+**Gaps:** 1 sentence on anything missing or incomplete (or "None" if complete)
+
+Keep it under 200 words total. Reference specific class names, method names, file paths.
+No backticks around identifiers. Write plain text."""
+
+    result = llm_generate(prompt, api_key=api_key) or ""
+    result = _strip_instruction_leakage(result)
+    return result.strip()
+
+
+def generate_turn_summary(turn: int, diffs_a: str, diffs_b: str,
+                          traces_a: str, traces_b: str,
+                          api_key: str,
+                          status_callback=None) -> dict:
+    """Generate change summaries for both trajectories in a turn.
+
+    Returns {"summary_a": str, "summary_b": str}.
+    """
+    if status_callback:
+        status_callback("Generating change summary for Model A...")
+    summary_a = generate_change_summary(turn, diffs_a, traces_a, "A", api_key)
+    time.sleep(GEMINI_RATE_LIMIT_SLEEP)
+
+    if status_callback:
+        status_callback("Generating change summary for Model B...")
+    summary_b = generate_change_summary(turn, diffs_b, traces_b, "B", api_key)
+
+    return {"summary_a": summary_a, "summary_b": summary_b}
+
+
+def format_turn_summary_md(summaries: dict, turn: int) -> str:
+    """Format both trajectory summaries into a markdown document."""
+    return (
+        f"# Turn {turn} Change Summary\n\n"
+        f"## Model A\n\n{summaries['summary_a']}\n\n"
+        f"---\n\n"
+        f"## Model B\n\n{summaries['summary_b']}\n"
+    )
+
+
 def _build_context_both(turn: int, diffs_a: str, diffs_b: str,
                         traces_a: str, traces_b: str,
                         acceptance_criteria: str) -> str:
     """Full context with both trajectories — for comparison questions (axes, overall)."""
     ctx = f"Turn {turn} of 3.\n\nTRAJECTORY A DIFF:\n{diffs_a[:6000]}\n\nTRAJECTORY B DIFF:\n{diffs_b[:6000]}\n"
     if traces_a:
-        ctx += f"\nTRACE A:\n{traces_a[:3000]}\n"
+        ctx += f"\nTRACE A (model A's full working session):\n{TRACE_GUIDE}\n{traces_a[:8000]}\n"
     if traces_b:
-        ctx += f"\nTRACE B:\n{traces_b[:3000]}\n"
+        ctx += f"\nTRACE B (model B's full working session):\n{traces_b[:8000]}\n"
     if acceptance_criteria:
         ctx += f"\nACCEPTANCE CRITERIA:\n{acceptance_criteria[:2000]}\n"
     return ctx
@@ -196,7 +267,7 @@ def _build_context_single(turn: int, diff: str, trace: str,
     Uses neutral labels (THE DIFF, THE TRACE) so the LLM doesnt infer a second model exists."""
     ctx = f"Turn {turn} of 3.\n\nTHE DIFF (this is the ONLY model output you are reviewing):\n{diff[:6000]}\n"
     if trace:
-        ctx += f"\nTHE TRACE:\n{trace[:3000]}\n"
+        ctx += f"\nTHE TRACE (the model's full working session):\n{TRACE_GUIDE}\n{trace[:8000]}\n"
     if acceptance_criteria:
         ctx += f"\nACCEPTANCE CRITERIA:\n{acceptance_criteria[:2000]}\n"
     return ctx
@@ -452,6 +523,8 @@ def _instr_a_solution():
         "Provide extremely detailed quality on the strengths and weaknesses of model A's solution.\n"
         "For code, this means the correctness and quality of the code.\n"
         "For clarification questions or explanations, this means the quality of the question or explanation.\n"
+        "Use the DIFF for code quality assessment. If a TRACE is available, use it to understand\n"
+        "WHY the model made certain choices (e.g. did it find the right pattern by exploring similar code?).\n"
         "CRITICAL RULES:\n"
         "- You are reviewing ONE diff. There is NO other model or diff\n"
         "- The words 'Model B', 'Trajectory B', 'the other model' are BANNED\n"
@@ -467,8 +540,14 @@ def _instr_a_agency():
         "(or was appropriately respectful of boundaries), whether the model showed good independent judgment by "
         "pushing back on bad suggestions or proceeding with good ones, whether or not the model appropriately "
         "sought clarification, and whether its actions, proposals, and engagement was similar to that of a senior engineer.\n"
+        "HOW TO USE THE TRACE:\n"
+        "- Look at [THINKING] blocks for the model's internal reasoning and decision-making process\n"
+        "- Look at [TOOL:Bash]/[TOOL:Read] entries to see what the model explored vs jumped to conclusions\n"
+        "- Look at [TOOL_RESULT] and [TOOL_ERROR] to see if the model noticed/handled errors\n"
+        "- Did the model run tests, build the code, or verify its work? ([TOOL:Bash] with test/build commands)\n"
+        "- Did it explore broadly first or jump straight to editing? (reading files vs writing immediately)\n"
         "CRITICAL RULES:\n"
-        "- Cite specific evidence in the transcript\n"
+        "- Reference specific actions from the trace (e.g. 'explored the codebase with grep before editing')\n"
         "- You are evaluating ONE agent. There is NO other model\n"
         "- The words 'Model B', 'Trajectory B', 'the other model' are BANNED\n"
         "- 4-6 sentences"
@@ -479,8 +558,13 @@ def _instr_a_comm():
         "Provide extremely detailed feedback on the strengths and weaknesses of model A's communication.\n"
         "Describe the overall understandability of the model's communication to you and final summary, "
         "how honest it was about the work it did, and the quality of its documentation and comments.\n"
+        "HOW TO USE THE TRACE:\n"
+        "- Look at [ASSISTANT] messages to evaluate clarity and accuracy of what the model told the user\n"
+        "- Compare [ASSISTANT] claims to [TOOL_RESULT] outputs — did the model accurately describe what happened?\n"
+        "- Check if the model's summary matches the actual changes in the diff\n"
+        "- Look at code comments in the diff for documentation quality\n"
         "CRITICAL RULES:\n"
-        "- Cite specific evidence in the transcript where appropriate\n"
+        "- Reference specific communication from the trace where appropriate\n"
         "- You are evaluating ONE set of changes. There is NO other model\n"
         "- The words 'Model B', 'Trajectory B', 'the other model', 'better than' are BANNED\n"
         "- Do NOT compare to anything else. Just evaluate THIS communication\n"
@@ -492,6 +576,8 @@ def _instr_b_solution():
         "Provide extremely detailed quality on the strengths and weaknesses of model B's solution.\n"
         "For code, this means the correctness and quality of the code.\n"
         "For clarification questions or explanations, this means the quality of the question or explanation.\n"
+        "Use the DIFF for code quality assessment. If a TRACE is available, use it to understand\n"
+        "WHY the model made certain choices (e.g. did it find the right pattern by exploring similar code?).\n"
         "CRITICAL RULES:\n"
         "- You are reviewing ONE diff. There is NO other model or diff\n"
         "- The words 'Model A', 'Trajectory A', 'the other model' are BANNED\n"
@@ -508,8 +594,14 @@ def _instr_b_agency():
         "(or was appropriately respectful of boundaries), whether the model showed good independent judgment by "
         "pushing back on bad suggestions or proceeding with good ones, whether or not the model appropriately "
         "sought clarification, and whether its actions, proposals, and engagement was similar to that of a senior engineer.\n"
+        "HOW TO USE THE TRACE:\n"
+        "- Look at [THINKING] blocks for the model's internal reasoning and decision-making process\n"
+        "- Look at [TOOL:Bash]/[TOOL:Read] entries to see what the model explored vs jumped to conclusions\n"
+        "- Look at [TOOL_RESULT] and [TOOL_ERROR] to see if the model noticed/handled errors\n"
+        "- Did the model run tests, build the code, or verify its work? ([TOOL:Bash] with test/build commands)\n"
+        "- Did it explore broadly first or jump straight to editing? (reading files vs writing immediately)\n"
         "CRITICAL RULES:\n"
-        "- Cite specific evidence in the transcript\n"
+        "- Reference specific actions from the trace (e.g. 'explored the codebase with grep before editing')\n"
         "- You are evaluating ONE agent. There is NO other model\n"
         "- The words 'Model A', 'Trajectory A', 'the other model' are BANNED\n"
         "- 4-6 sentences"
@@ -520,8 +612,13 @@ def _instr_b_comm():
         "Provide extremely detailed feedback on the strengths and weaknesses of model B's communication.\n"
         "Describe the overall understandability of the model's communication to you and final summary, "
         "how honest it was about the work it did, and the quality of its documentation and comments.\n"
+        "HOW TO USE THE TRACE:\n"
+        "- Look at [ASSISTANT] messages to evaluate clarity and accuracy of what the model told the user\n"
+        "- Compare [ASSISTANT] claims to [TOOL_RESULT] outputs — did the model accurately describe what happened?\n"
+        "- Check if the model's summary matches the actual changes in the diff\n"
+        "- Look at code comments in the diff for documentation quality\n"
         "CRITICAL RULES:\n"
-        "- Cite specific evidence in the transcript where appropriate\n"
+        "- Reference specific communication from the trace where appropriate\n"
         "- You are evaluating ONE set of changes. There is NO other model\n"
         "- The words 'Model A', 'Trajectory A', 'the other model', 'better than' are BANNED\n"
         "- Do NOT compare to anything else. Just evaluate THIS communication\n"
@@ -565,6 +662,15 @@ Rate ALL 11 axes comparing A vs B. Pick one of:
   (A4=A much better, A3=A better, A2=A slightly better, A1=A barely better, B1=B barely better, B2=B slightly better, B3=B better, B4=B much better)
   There is NO "same" option. You MUST pick a side for every axis.
 
+IMPORTANT: Use BOTH the diffs AND the traces to rate these axes.
+- correctness/mergeability/instruction_following/scope_calibration: primarily from the DIFF
+- verification: did the model run tests or build commands? Check TRACE for [TOOL:Bash] with test/build/compile
+- engineering_process: did the model explore before editing? Check TRACE for exploration pattern
+- risk_management: did the model make destructive changes without confirming? Check TRACE
+- honesty: did [ASSISTANT] messages accurately describe what happened vs [TOOL_RESULT]?
+- clarification_behavior: did the model ask questions or charge ahead? Check TRACE
+- intellectual_independence: did the model push back on anything or follow instructions blindly?
+
 Format: AXIS_NAME: rating (one per line, no justification)
 
 {axes_desc}"""
@@ -582,10 +688,11 @@ def _gen_overall(context: str, api_key: str) -> dict:
 
 PREFERENCE: (pick one, NO "same") A4 / A3 / A2 / A1 / B1 / B2 / B3 / B4
 KEY_AXES: (pick up to 3) correctness,mergeability,instruction_following,scope_calibration,risk_management,honesty,intellectual_independence,verification,clarification_behavior,engineering_process,tone_understandability
-JUSTIFICATION: 3-5 sentences explaining your preference. Reference specific files/functions.
+JUSTIFICATION: 3-5 sentences explaining your preference. Reference specific files/functions from the diffs AND specific behaviors from the traces.
 
 IMPORTANT: You MUST pick either A or B as your preference. "same" is NOT allowed. One model is always at least slightly better.
 Your justification MUST match your preference. If you pick A3, justify why A is better.
+Use BOTH diffs and traces: diffs show WHAT was produced, traces show HOW the model worked (exploration, verification, error handling).
 
 {HUMAN_WRITING_CORE}
 Voice: {voice}

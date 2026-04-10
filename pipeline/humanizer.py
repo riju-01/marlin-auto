@@ -771,52 +771,61 @@ def _humanize_prose_block(text: str, api_key: str) -> str:
 
 
 def humanize_prompt(text: str, api_key: str, target: float = None) -> str:
-    """Humanize a prompt while preserving markdown structure (headers, bullets, bold labels).
-
-    Unlike humanize_field (for feedback), this splits the prompt into structural
-    lines (bullets, headers, bold labels) and prose blocks, only humanizing the
-    prose. This prevents the pipeline from flattening organized prompts into
-    wall-of-text prose.
+    """Humanize a prompt — flattens any remaining markdown structure into
+    continuous paragraphs and applies regex cleanup + humanization passes.
     """
     if target is None:
         target = AI_SCORE_TARGET
+
+    # Flatten any markdown structure (headings, bullets, bold labels) into prose
+    text = _flatten_to_prose(text)
 
     score = score_field(text)
     if score < target:
         return text
 
-    lines = text.split("\n")
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     result = []
-    prose_buffer = []
+    for para in paragraphs:
+        humanized = _humanize_prose_block(para, api_key)
+        result.append(humanized)
 
-    def flush_prose():
-        if not prose_buffer:
-            return
-        block = " ".join(prose_buffer)
-        if len(block.strip()) > 30:
-            block = _humanize_prose_block(block, api_key)
-        result.append(block)
-        prose_buffer.clear()
-
-    for line in lines:
-        if _is_structural_line(line):
-            flush_prose()
-            cleaned = _regex_cleanup(line)
-            cleaned = _remove_em_dashes_global(cleaned)
-            result.append(cleaned)
-        else:
-            prose_buffer.append(line.strip())
-
-    flush_prose()
-
-    current = "\n".join(result)
-
-    # Remove trailing period from the very last non-empty line
-    final_lines = current.split("\n")
-    for i in range(len(final_lines) - 1, -1, -1):
-        if final_lines[i].strip():
-            final_lines[i] = _remove_trailing_period(final_lines[i])
-            break
-    current = "\n".join(final_lines)
+    current = "\n\n".join(result)
+    current = _remove_trailing_period(current)
 
     return current
+
+
+def _flatten_to_prose(text: str) -> str:
+    """Strip all markdown formatting and convert structured text into continuous paragraphs."""
+    lines = text.split("\n")
+    paragraphs = []
+    current_para = []
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if current_para:
+                paragraphs.append(" ".join(current_para))
+                current_para = []
+            continue
+
+        # Strip heading markers
+        if stripped.startswith("#"):
+            stripped = re.sub(r'^#+\s*', '', stripped)
+        # Strip bold labels like "**Where to look:**"
+        stripped = re.sub(r'\*\*([^*]+)\*\*:?\s*', r'\1: ', stripped)
+        stripped = re.sub(r'\*\*([^*]+)\*\*', r'\1', stripped)
+        # Strip bullet prefixes
+        stripped = re.sub(r'^[-*•]\s+', '', stripped)
+        stripped = re.sub(r'^\d+\.\s+', '', stripped)
+        # Strip remaining markdown
+        stripped = stripped.replace('`', '')
+
+        if stripped:
+            current_para.append(stripped)
+
+    if current_para:
+        paragraphs.append(" ".join(current_para))
+
+    return "\n\n".join(paragraphs)

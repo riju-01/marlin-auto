@@ -163,17 +163,17 @@ Items to address this turn:
 {items_hint}
 
 Rules:
-1. 80-180 words
+1. 80-180 words as CONTINUOUS PARAGRAPHS. No headings, no bold labels, no bullet points, no markdown
 2. Describe the PROBLEM, not the solution
 3. Be vague enough that the model discovers the approach, but specific enough it targets the right files
 4. No PR references, no "act as", no line numbers
 5. Drop apostrophes: dont, its, wont, doesnt
 6. No em dashes
 7. No trailing period on last sentence
-8. Write like a developer leaving a code review comment or follow-up task
+8. Write like a developer explaining what to do next in a message — conversational, flowing prose
 9. Do NOT repeat anything from previous prompts
 
-Return ONLY the prompt text."""
+Return ONLY the prompt text as continuous paragraphs."""
 
     user_prompt = f"""Previous prompts (do NOT repeat):
 {prev_prompt_text}

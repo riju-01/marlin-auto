@@ -7,6 +7,7 @@ This includes:
   - Edge cases (4-6 concrete cases)
   - Acceptance criteria (5-7 done-when items)
   - PR change checklist (6-8 concrete things the PR does)
+  - Prompt categories (HFI pre-thread survey labels)
   - Turn 1 prompt (150-250 words, covers items 1-5 vaguely)
 
 Also generates standalone turn1_prompt.txt for copy-paste into HFI.
@@ -33,33 +34,128 @@ CRITICAL RULES:
 
 PROMPT_RULES = """Additional rules for the Initial Prompt section ONLY:
 
-STRUCTURE (rubric requires this):
-- Start with a 1-2 sentence summary of what the task is before any detail
-- Organize into short labeled sections. Use bold labels like **Where to work:** or **What to remove:** - NOT formal "Objective / Scope / Deliverables" headers
-- Use bullet points to enumerate specific targets (APIs, methods, classes, paths)
-- End with a **Done when:** section: 2-3 bullets that are testable completion criteria
-- Keep total length 150-300 words. Structure doesnt mean verbose
+FORMAT:
+- Write as CONTINUOUS PARAGRAPHS. No headings, no bold labels, no bullet points, no markdown
+- NO "**Where to look:**" or "**Done when:**" sections. Weave everything into flowing prose
+- 150-300 words total, written as 3-5 connected paragraphs
+- Each paragraph should flow naturally into the next like a developer explaining a task conversationally
 
 TONE:
-- Write like a developer posting in a team channel: casual but organized
+- Write like a developer explaining a task to a colleague in a message or email
 - Tone: senior engineer who typed this in 3 minutes. Not angry, not formal. Just clear
 - Drop apostrophes naturally: dont, its, wont, doesnt, cant, shouldnt
-- Mix sentence lengths in the prose parts. Bullets can be terse
+- Mix sentence lengths. Some short, some longer with commas connecting related thoughts
 - Use abbreviations where natural: param, repo, config, deps, e.g.
-- One or two natural asides are fine (e.g. "they had warnings")
 
 CONTENT:
+- Start with what the problem is and why it matters (1-2 sentences)
+- Then describe where to look and what areas are involved
+- Then describe what needs to happen (the what, not the how)
+- End with what "done" looks like — woven into the final sentences, not as a labeled list
 - Describe the PROBLEM, not the solution
 - Reference general areas (modules, packages, config names) but be VAGUE about exact fixes
-- The opening summary says what the task is. The sections say where/what/done-when
-- No trailing period on the last bullet or sentence
+- No trailing period on the last sentence
 
 NEVER:
+- NEVER use headings (no ##, no **Bold Label:**)
+- NEVER use bullet points or numbered lists
+- NEVER use markdown formatting of any kind
 - NEVER use: "Ideally", "Currently", "Additionally", "Furthermore", "Notably"
-- NEVER use "Done means X" or "Objective:" or "Success Criteria:" as headers
-- NEVER start consecutive sentences or bullets the same way
-- NEVER write more than 2-3 sentences in a row without a bullet list or section break
+- NEVER start consecutive sentences the same way
 - Avoid slang, profanity, or overly emotional language"""
+
+
+PROMPT_CATEGORIES = [
+    "Greenfield",
+    "Ambiguous",
+    "Git",
+    "Discussion",
+    "Explaining",
+    "Code Review",
+    "Chore",
+    "Documentation",
+    "Performance",
+    "Other",
+]
+
+CATEGORY_DEFINITIONS = {
+    "Greenfield": "Building something new from scratch — new feature, new module, new service, new project",
+    "Ambiguous": "The prompt is intentionally vague or underspecified, requiring the model to ask clarifying questions or make judgment calls",
+    "Git": "The task involves git operations — branching, merging, rebasing, resolving conflicts, cherry-picking",
+    "Discussion": "Asking the model to discuss tradeoffs, propose approaches, or have a design conversation before coding",
+    "Explaining": "Asking the model to explain existing code, architecture, or behavior",
+    "Code Review": "Reviewing existing code for bugs, improvements, or style issues",
+    "Chore": "Maintenance/infrastructure work — dependency updates, CI config, linting, telemetry plumbing, refactoring with no behavior change",
+    "Documentation": "Writing or updating documentation, READMEs, comments, or docstrings",
+    "Performance": "Optimizing performance, adding benchmarks, profiling, or adding performance metrics/instrumentation",
+    "Other": "Doesnt fit any of the above categories",
+}
+
+
+def classify_prompt_categories(prompt_text: str, pr_def: str, checklist: list[dict],
+                               api_key: str) -> list[str]:
+    """Use LLM to classify which HFI prompt categories apply to the Turn 1 prompt."""
+    cat_descriptions = "\n".join(
+        f"- {name}: {desc}" for name, desc in CATEGORY_DEFINITIONS.items()
+    )
+
+    checklist_summary = "\n".join(
+        f"  {item.get('id', '?')}. {item.get('description', '')}"
+        for item in (checklist or [])
+    )
+
+    classification_prompt = f"""Classify this coding prompt into one or more categories.
+
+AVAILABLE CATEGORIES:
+{cat_descriptions}
+
+RULES:
+- Select ALL categories that apply (usually 1-3)
+- Do NOT select "Other" if any specific category fits
+- A prompt can be both "Chore" and "Performance" if it adds metrics/telemetry instrumentation
+- "Greenfield" means building something entirely new, not adding to existing code
+- "Ambiguous" means the prompt is intentionally vague about HOW to solve it (most structured prompts are NOT ambiguous)
+- Be conservative — only pick categories where the fit is clear
+
+PR CONTEXT:
+{pr_def[:1000]}
+
+CHECKLIST OF CHANGES:
+{checklist_summary}
+
+THE PROMPT TO CLASSIFY:
+{prompt_text}
+
+Return ONLY a JSON array of matching category names, e.g. ["Chore", "Performance"]
+No explanation, no markdown fences."""
+
+    result = llm_generate(classification_prompt, api_key=api_key)
+    if not result:
+        return []
+
+    return _parse_categories(result)
+
+
+def _parse_categories(raw: str) -> list[str]:
+    """Parse the category JSON array from LLM output."""
+    if not raw:
+        return []
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+    if raw.endswith("```"):
+        raw = raw.rsplit("```", 1)[0]
+    raw = raw.strip()
+    try:
+        items = json.loads(raw)
+        if isinstance(items, list):
+            valid = [c for c in items if c in PROMPT_CATEGORIES]
+            return valid if valid else ["Other"]
+    except json.JSONDecodeError:
+        pass
+    # Fallback: try to extract category names from text
+    found = [c for c in PROMPT_CATEGORIES if c.lower() in raw.lower()]
+    return found if found else ["Other"]
 
 
 def generate_phase2_doc(pr_data: dict, diff_text: str, api_key: str,
@@ -168,34 +264,34 @@ Return ONLY valid JSON, no markdown fences, no explanation."""
 The PR addresses these specific issues (items 1-{len(turn1_items)}):
 {turn1_item_hints}
 
-Write a 150-300 word STRUCTURED prompt. Start with a 1-2 sentence summary, then use bold-labeled sections and bullet points.
+Write a 150-300 word prompt as CONTINUOUS PARAGRAPHS. No headings, no bold labels, no bullet points, no markdown at all.
 Be VAGUE enough that the reader has to figure out the approach, but clear about what the problem IS.
 Dont list the changes needed. Dont mention specific functions to fix. Describe the symptoms and what "fixed" looks like.
 A good developer reading this should NATURALLY discover items 1-{len(turn1_items)} by understanding the problem well.
 
-BAD example (wall of text, no structure, buried instructions):
-"Currently, the allocation logic is spread across several files. Ideally, we want to reduce the number of separate allocations. This makes the code harder to follow for anyone new. The config helpers are also outdated. Done means faster creation and the tests pass."
-
-BAD example (too formal, template-y headers):
-"## Objective\nRemove deprecated APIs.\n## Scope\nThe client module.\n## Success Criteria\n- Build passes."
-
-GOOD example (structured but human):
-"Chat sessions are sticking around in the background even when nobody is using them. Mostly the local chat agent. Its eating resources, especially when someone spawns a bunch and forgets about them.
+BAD example (has headings and bullets — we dont want this):
+"Chat sessions are sticking around in the background.
 
 **Where this shows up:**
-- Background session lifecycle in the chat view layer
-- The global config toggle that controls keepalive (too coarse)
-
-**What needs to happen:**
-- Sessions created for quick/disposable use shouldnt persist after the view closes
-- The keepalive setting needs a per-session override, not just the global flag
+- Background session lifecycle
+- The global config toggle
 
 **Done when:**
-- Quick chat sessions dont survive past their parent view
-- Existing long-lived sessions still work as before
-- Tests cover both paths"
+- Quick chat sessions dont survive past their parent view"
 
-Return ONLY the prompt text, nothing else."""
+BAD example (too formal, uses AI words):
+"Currently, the allocation logic is spread across several files. Ideally, we want to reduce the number of separate allocations. Additionally, the config helpers are outdated."
+
+GOOD example (continuous paragraphs, conversational, no formatting):
+"Chat sessions are sticking around in the background even when nobody is using them. Mostly the local chat agent, its eating resources especially when someone spawns a bunch and forgets about them.
+
+You can look in the chat view layer where the background session lifecycle is managed. The global config toggle that controls keepalive is too coarse right now, it applies to everything instead of letting each session type decide.
+
+Sessions created for quick or disposable use shouldnt persist after the view closes, but the long-lived ones still need to work as before. The keepalive setting needs a per-session override not just the global flag.
+
+The task will be done when quick chat sessions dont survive past their parent view, existing sessions still work, and tests cover both paths"
+
+Return ONLY the prompt text as continuous paragraphs, nothing else."""
 
     raw_prompt = llm_generate(prompt_gen, api_key=api_key)
     if not raw_prompt:
@@ -209,12 +305,21 @@ Return ONLY the prompt text, nothing else."""
     # Parse sections from the analysis
     sections = _parse_sections(analysis)
 
+    pr_def = sections.get("pr_definition", sections.get("pr definition", ""))
+
+    # Classify prompt categories for HFI pre-thread survey
+    if status_callback:
+        status_callback("Classifying prompt categories...")
+
+    categories = classify_prompt_categories(prompt, pr_def, checklist, api_key)
+
     return {
         "repo_def": sections.get("repo_definition", sections.get("repo definition", "")),
-        "pr_def": sections.get("pr_definition", sections.get("pr definition", "")),
+        "pr_def": pr_def,
         "edge_cases": sections.get("edge_cases", sections.get("edge cases", "")),
         "acceptance_criteria": sections.get("acceptance_criteria", sections.get("acceptance criteria", "")),
         "checklist": checklist,
+        "categories": categories,
         "prompt": prompt,
         "raw_analysis": analysis,
     }
@@ -274,6 +379,19 @@ def format_phase2_md(pr_data: dict, phase2: dict) -> str:
     else:
         checklist_md = "(no checklist generated)"
 
+    categories = phase2.get("categories", [])
+    if categories:
+        all_cats = PROMPT_CATEGORIES
+        cat_lines = []
+        for cat in all_cats:
+            if cat in categories:
+                cat_lines.append(f"- [x] **{cat}**")
+            else:
+                cat_lines.append(f"- [ ] {cat}")
+        categories_md = "\n".join(cat_lines)
+    else:
+        categories_md = "(no categories classified)"
+
     return f"""# MARLIN V3 -- PHASE 2 PROMPT PREPARATION
 
 **PR URL:** {pr_data['url']}
@@ -302,6 +420,9 @@ def format_phase2_md(pr_data: dict, phase2: dict) -> str:
 
 ## Acceptance Criteria
 {phase2['acceptance_criteria']}
+
+## Prompt Categories
+{categories_md}
 
 ## Initial Prompt
 {phase2['prompt']}

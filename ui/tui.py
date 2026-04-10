@@ -298,6 +298,32 @@ def display_waiting_for_turn(turn_num: int):
     ))
 
 
+def display_change_summary(summaries: dict, turn: int):
+    """Show what each model did in this turn — side-by-side-ish panels."""
+    console.print()
+    console.print(f"[bold cyan]{'='*60}[/bold cyan]")
+    console.print(f"[bold cyan]  TURN {turn} — WHAT THE MODELS DID[/bold cyan]")
+    console.print(f"[bold cyan]{'='*60}[/bold cyan]")
+    console.print()
+
+    console.print(Panel(
+        summaries.get("summary_a", "(no summary)"),
+        title="[bold blue]Model A Changes[/bold blue]",
+        box=box.ROUNDED,
+        padding=(1, 2),
+        border_style="blue",
+    ))
+    console.print()
+    console.print(Panel(
+        summaries.get("summary_b", "(no summary)"),
+        title="[bold magenta]Model B Changes[/bold magenta]",
+        box=box.ROUNDED,
+        padding=(1, 2),
+        border_style="magenta",
+    ))
+    console.print()
+
+
 def display_feedback_answers(answers: dict, field_scores: dict, turn: int):
     """Display all 21 HFI answers with per-field AI scores."""
     console.print()

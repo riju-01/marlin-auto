@@ -42,9 +42,12 @@ from core.utils import (
 )
 from core.llm_client import detect_provider, provider_info
 from integrations.pr_fetcher import rank_prs, fetch_pr_diff, parse_pr_url, fetch_and_rank_pr
-from pipeline.prompt_generator import generate_phase2_doc, format_phase2_md, generate_turn1_prompt
+from pipeline.prompt_generator import generate_phase2_doc, format_phase2_md, generate_turn1_prompt, PROMPT_CATEGORIES
 from pipeline.turn_prompt_generator import generate_turn_prompt
-from pipeline.feedback_generator import generate_all_feedback, format_feedback_md, regenerate_single_field
+from pipeline.feedback_generator import (
+    generate_all_feedback, format_feedback_md, regenerate_single_field,
+    generate_turn_summary, format_turn_summary_md,
+)
 from core.ai_scorer import score_field, full_validation
 from integrations.hfi_watcher import (
     find_session_dir, wait_for_turn, extract_diffs_from_worktrees,
@@ -57,7 +60,7 @@ from ui.tui import (
     display_prompt, get_edited_prompt, display_setup_progress,
     display_hfi_commands, display_waiting_for_turn, display_feedback_answers,
     display_feedback_file_path, ask_continue_or_view, ask_field_number, wait_for_user,
-    display_between_turns, display_completion,
+    display_between_turns, display_completion, display_change_summary,
 )
 
 
@@ -148,13 +151,14 @@ def _generate_claude_md(repo_dir: str, owner: str, repo: str, pr_data: dict):
     wsl_exec(f"cat > '{repo_dir}/CLAUDE.md' << 'CLAUDEEOF'\n{content}\nCLAUDEEOF")
 
 
-def _find_and_copy_hfi(repo_dir: str):
-    """Search common locations for the claude-hfi binary and copy it."""
+def _find_hfi_binary() -> str:
+    """Search common locations for the claude-hfi binary and return its path."""
     local_hfi = f"{HFI_LOCAL_DIR}/claude-hfi"
     local_bin = f"{MARLIN_AUTO_DIR}/bin/claude-hfi"
     search_script = (
         '#!/bin/bash\n'
         f'for f in "{local_hfi}" "{local_bin}" '
+        '$HOME/marlin-tools/claude-hfi '
         '~/Downloads/claude-hfi '
         '~/Downloads/linux-amd64 '
         '~/Downloads/linux-arm64 '
@@ -169,16 +173,29 @@ def _find_and_copy_hfi(repo_dir: str):
         'echo "FOUND="\n'
     )
     _, out, _ = wsl_exec_script(search_script)
-    found = ""
     for line in out.strip().split("\n"):
         if line.startswith("FOUND="):
             found = line.split("=", 1)[1].strip()
+            if found:
+                return found
+    return ""
 
-    if found:
-        wsl_exec(f"cp '{found}' '{repo_dir}/claude-hfi' && chmod +x '{repo_dir}/claude-hfi'")
+
+def _gitignore_artifacts(repo_dir: str):
+    """Append setup artifacts to .gitignore so they never appear in diffs."""
+    artifacts = ["claude-hfi", ".claude/"]
+    script = (
+        f"cd '{repo_dir}' && "
+        "touch .gitignore && "
+        + " && ".join(
+            f"grep -qxF '{a}' .gitignore || echo '{a}' >> .gitignore"
+            for a in artifacts
+        )
+    )
+    wsl_exec(script)
 
 
-def _run_setup(task_name: str, pr_data: dict, task_state: str) -> str:
+def _run_setup(task_name: str, pr_data: dict, task_state: str) -> tuple[str, str]:
     """Run Phase 3 environment setup with a live progress bar."""
     from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 
@@ -195,7 +212,7 @@ def _run_setup(task_name: str, pr_data: dict, task_state: str) -> str:
         ("Clone repository", 15),
         ("Install dependencies & configure env", 55),
         ("Generate CLAUDE.md", 10),
-        ("Copy HFI binary", 10),
+        ("Locate HFI binary", 10),
         ("Verify artifacts", 10),
     ]
 
@@ -268,7 +285,7 @@ def _run_setup(task_name: str, pr_data: dict, task_state: str) -> str:
                 repo_dir = ls_out.strip().rstrip("/")
                 print_status(f"Found existing dir: {repo_dir}")
             if not repo_dir:
-                return ""
+                return "", ""
 
         _finish_step(w)
 
@@ -318,17 +335,17 @@ def _run_setup(task_name: str, pr_data: dict, task_state: str) -> str:
             _generate_claude_md(repo_dir, owner, repo, pr_data)
         _finish_step(w)
 
-        # --- Step 4: HFI binary — search common locations ---
+        # --- Step 4: Locate HFI binary (no longer copied into repo) ---
         w = _advance_step(3, "Locating HFI binary...")
-        _, hfi_check, _ = wsl_exec(f"test -x '{repo_dir}/claude-hfi' && echo YES || echo NO")
-        if "YES" not in hfi_check:
-            _find_and_copy_hfi(repo_dir)
+        hfi_bin = _find_hfi_binary()
         # Remove symlinks that break claude-hfi worktree creation (ENOTSUP copyfile)
         wsl_exec(
             f"find '{repo_dir}' -type l -name 'lib64' -delete 2>/dev/null; "
             f"find '{repo_dir}' -maxdepth 3 -type l ! -readable -delete 2>/dev/null; "
             f"echo 'Cleaned symlinks'"
         )
+        # Keep repo diffs clean: exclude setup artifacts from git tracking
+        _gitignore_artifacts(repo_dir)
         _finish_step(w)
 
         # --- Step 5: Verify artifacts ---
@@ -337,7 +354,7 @@ def _run_setup(task_name: str, pr_data: dict, task_state: str) -> str:
             "Repo exists": f"test -d '{repo_dir}'",
             "Git init":    f"test -d '{repo_dir}/.git'",
             "CLAUDE.md":   f"test -f '{repo_dir}/CLAUDE.md'",
-            "HFI binary":  f"test -x '{repo_dir}/claude-hfi'",
+            "HFI binary":  f"test -x '{hfi_bin}'" if hfi_bin else "echo NO",
         }
         verify_results = {}
         for label, cmd in checks.items():
@@ -359,16 +376,15 @@ def _run_setup(task_name: str, pr_data: dict, task_state: str) -> str:
             "[bold yellow]claude-hfi binary not found![/bold yellow]\n\n"
             "The automation searched these locations:\n"
             f"  {HFI_LOCAL_DIR}/claude-hfi  [bold](put the binary here)[/bold]\n"
-            f"  {MARLIN_AUTO_DIR}/bin/claude-hfi  (legacy fallback)\n"
             "  ~/marlin-tools/claude-hfi\n"
             "  ~/Downloads/claude-hfi\n"
             "  /mnt/c/Users/*/Downloads/claude-hfi\n\n"
             "[bold]To fix:[/bold]\n"
             "  1. Download claude-hfi from Anthropic\n"
             "     (check your Snorkel task instructions or team Slack)\n"
-            f"  2. Copy it to the repo:\n"
-            f"     [cyan]cp ~/Downloads/claude-hfi {repo_dir}/claude-hfi[/cyan]\n"
-            f"     [cyan]chmod +x {repo_dir}/claude-hfi[/cyan]\n\n"
+            "  2. Place it somewhere permanent:\n"
+            "     [cyan]cp ~/Downloads/claude-hfi ~/marlin-tools/claude-hfi[/cyan]\n"
+            "     [cyan]chmod +x ~/marlin-tools/claude-hfi[/cyan]\n\n"
             "[dim]The rest of the automation will still work — prompts and\n"
             "feedback answers will be generated. You just can't run HFI\n"
             "sessions until the binary is in place.[/dim]",
@@ -388,10 +404,12 @@ def _run_setup(task_name: str, pr_data: dict, task_state: str) -> str:
         print_success("Environment setup complete!")
 
     write_task_file(task_name, "task_state.env",
-                    task_state + f"REPO_DIR={repo_dir}\nPHASE=3_COMPLETE\n")
+                    task_state + f"REPO_DIR={repo_dir}\nHFI_BIN={hfi_bin}\nPHASE=3_COMPLETE\n")
     print_success(f"Repo dir: {repo_dir}")
+    if hfi_bin:
+        print_success(f"HFI binary: {hfi_bin}")
 
-    return repo_dir
+    return repo_dir, hfi_bin
 
 
 def main():
@@ -466,6 +484,7 @@ def main():
             return
 
         repo_dir = args.repo_dir or state.get("REPO_DIR", "")
+        hfi_bin = state.get("HFI_BIN", "") or _find_hfi_binary()
         prompt_text = read_task_file(task_name, "turn1_prompt.txt")
         if not prompt_text:
             phase2_raw = read_task_file(task_name, "phase2.md")
@@ -627,6 +646,20 @@ def main():
                     box=rbox.ROUNDED, padding=(0, 1),
                 ))
 
+            categories = phase2_doc.get("categories", [])
+            if categories:
+                cat_lines = []
+                for cat in PROMPT_CATEGORIES:
+                    if cat in categories:
+                        cat_lines.append(f"  [bold green]☑[/bold green] {cat}")
+                    else:
+                        cat_lines.append(f"  [dim]☐ {cat}[/dim]")
+                console.print(Panel(
+                    "\n".join(cat_lines),
+                    title="[bold]Prompt Categories (for HFI pre-thread survey)[/bold]",
+                    box=rbox.ROUNDED, padding=(0, 1),
+                ))
+
             validation = full_validation(prompt_text)
             action = display_prompt(prompt_text, validation["overall"], turn=1)
 
@@ -653,13 +686,16 @@ def main():
         # PHASE 3: Environment Setup
         # ----------------------------------------------------------
         repo_dir = args.repo_dir or ""
+        hfi_bin = ""
 
         if not args.skip_setup and not repo_dir:
-            repo_dir = _run_setup(task_name, pr_data, task_state)
+            repo_dir, hfi_bin = _run_setup(task_name, pr_data, task_state)
         elif args.skip_setup:
             print_status("Skipping setup (--skip-setup)")
+            hfi_bin = _find_hfi_binary()
         elif repo_dir:
             print_status(f"Using provided repo dir: {repo_dir}")
+            hfi_bin = _find_hfi_binary()
 
         _resume_start_turn = 1
         _resume_completed = []
@@ -668,6 +704,10 @@ def main():
     # TURN LOOP (1-3)
     # ------------------------------------------------------------------
     prompts = [prompt_text]
+    for prev_t in range(2, _resume_start_turn):
+        prev_prompt = read_task_file(task_name, f"turn{prev_t}_prompt.txt")
+        if prev_prompt:
+            prompts.append(prev_prompt)
     acceptance_criteria = read_task_file(task_name, "phase2.md") or prompt_text
     completed_items: list[int] = list(_resume_completed)
 
@@ -727,7 +767,7 @@ def main():
                 next_prompt = get_edited_prompt()
                 prompts.append(next_prompt)
 
-        hfi_cmds = get_hfi_launch_commands(repo_dir or "<REPO_DIR>", is_continue)
+        hfi_cmds = get_hfi_launch_commands(repo_dir or "<REPO_DIR>", is_continue, hfi_bin=hfi_bin)
         current_prompt = prompts[turn_num - 1]
         display_hfi_commands(hfi_cmds)
 
@@ -803,9 +843,13 @@ bash scripts/marlin_review.sh 2>&1
             wsl_exec_script(review_script, timeout=120)
             diffs_combined = read_task_file(task_name, f"turn{turn_num}_diffs.txt")
             if diffs_combined:
-                mid = len(diffs_combined) // 2
-                diffs_a = diffs_combined[:mid]
-                diffs_b = diffs_combined[mid:]
+                if "=== TRAJECTORY B ===" in diffs_combined:
+                    parts = diffs_combined.split("=== TRAJECTORY B ===", 1)
+                    diffs_a = parts[0].replace("=== TRAJECTORY A ===", "").strip()
+                    diffs_b = parts[1].strip()
+                else:
+                    diffs_a = diffs_combined
+                    diffs_b = ""
 
         combined_diffs = f"=== TRAJECTORY A ===\n{diffs_a}\n\n=== TRAJECTORY B ===\n{diffs_b}"
         write_task_file(task_name, f"turn{turn_num}_diffs.txt", combined_diffs)
@@ -821,6 +865,35 @@ bash scripts/marlin_review.sh 2>&1
                 traces_a = extract_trace(jsonl_a)
             if jsonl_b:
                 traces_b = extract_trace(jsonl_b)
+
+        # Save traces for later re-generation / manual inspection
+        if traces_a or traces_b:
+            combined_traces = f"=== TRACE A ===\n{traces_a}\n\n=== TRACE B ===\n{traces_b}"
+            write_task_file(task_name, f"turn{turn_num}_traces.txt", combined_traces)
+            print_success(f"Traces saved: turn{turn_num}_traces.txt ({len(traces_a)} + {len(traces_b)} chars)")
+        else:
+            # Try loading previously saved traces (useful for --resume or re-generation)
+            saved_traces = read_task_file(task_name, f"turn{turn_num}_traces.txt")
+            if saved_traces:
+                print_status("No live session found, loading saved traces...")
+                if "=== TRACE A ===" in saved_traces and "=== TRACE B ===" in saved_traces:
+                    parts = saved_traces.split("=== TRACE B ===")
+                    traces_a = parts[0].replace("=== TRACE A ===", "").strip()
+                    traces_b = parts[1].strip() if len(parts) > 1 else ""
+                    print_success(f"Loaded saved traces ({len(traces_a)} + {len(traces_b)} chars)")
+
+        # Generate and display change summaries
+        print_status("Generating change summaries...")
+        summaries = generate_turn_summary(
+            turn=turn_num, diffs_a=diffs_a, diffs_b=diffs_b,
+            traces_a=traces_a, traces_b=traces_b,
+            api_key=api_key,
+            status_callback=lambda m: print_status(m),
+        )
+        summary_md = format_turn_summary_md(summaries, turn_num)
+        write_task_file(task_name, f"turn{turn_num}_summary.md", summary_md)
+        print_success(f"Change summary saved: turn{turn_num}_summary.md")
+        display_change_summary(summaries, turn_num)
 
         # Generate feedback
         print_status("Generating 17 feedback answers...")
@@ -894,7 +967,7 @@ bash scripts/marlin_review.sh 2>&1
 
         if turn_num < 3:
             between_steps = get_between_turn_steps(turn_num)
-            next_hfi_cmds = get_hfi_launch_commands(repo_dir or "<REPO_DIR>", is_continue=True)
+            next_hfi_cmds = get_hfi_launch_commands(repo_dir or "<REPO_DIR>", is_continue=True, hfi_bin=hfi_bin)
             display_between_turns(turn_num, between_steps, next_hfi_cmds)
             wait_for_user("Press Enter after completing all steps above...")
         else:
